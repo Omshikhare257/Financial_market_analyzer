@@ -1,18 +1,9 @@
 #!/usr/bin/env python3
 """
-╔══════════════════════════════════════════════════════════════════════════╗
-║   FINVISION v5.0 — AUTO-REFRESH · AI Future Score · Live Pulse         ║
-║   • Prices auto-refresh every 5s — no manual refresh needed             ║
-║   • Future Performance Engine: 8-factor AI scoring                      ║
-║   • Multi-source prediction: technicals + fundamentals + sentiment      ║
-║   • Background refresh every 60 seconds (full data)                     ║
-║   • Any stock worldwide · Any language AI chat                           ║
-╚══════════════════════════════════════════════════════════════════════════╝
-
-HOW TO RUN:
-  pip install flask yfinance pandas numpy requests beautifulsoup4 anthropic lxml
-  python finvision_v5.py
-  Open: http://localhost:5000
+FinVision v5.1 — Vercel-ready build
+- Renamed to app.py for Vercel Flask detection
+- Background threads removed (serverless-safe)
+- All features intact: Live Pulse, 8-Factor AI Score, Multi-language Chat
 """
 
 import os, re, json, threading, time, traceback
@@ -42,17 +33,17 @@ except ImportError:
     AI_AVAILABLE = False
 
 app = Flask(__name__)
-app.secret_key = "finvision_v5_2025"
+app.secret_key = os.environ.get("SECRET_KEY", "finvision_v5_2025")
 
 # ─────────────────────────────────────────────────────────────
-# SERVER-SIDE CACHE
+# SERVER-SIDE CACHE (in-memory, works on serverless per-instance)
 # ─────────────────────────────────────────────────────────────
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
-_CACHE_TTL = 60  # seconds (reduced for faster refresh)
-_LIVE_PRICES = {}  # fast-path live price cache
+_CACHE_TTL = 60
+_LIVE_PRICES = {}
 _LIVE_LOCK = threading.Lock()
-_LIVE_TTL = 5  # seconds
+_LIVE_TTL = 5
 
 def cache_get(key, ttl=None):
     with _CACHE_LOCK:
@@ -132,7 +123,6 @@ FOREX_PAIRS = {
     "AUD/USD":"AUDUSD=X","USD/CHF":"USDCHF=X","USD/CNY":"USDCNY=X",
 }
 
-# All tickers for live pulse refresh
 ALL_LIVE_TICKERS = {}
 ALL_LIVE_TICKERS.update(INDIAN_INDICES)
 ALL_LIVE_TICKERS.update(GLOBAL_INDICES)
@@ -181,7 +171,6 @@ def _fetch_one(ticker, timeout=8):
         return {"error": str(e)[:60]}
 
 def _fetch_live_price_only(ticker, timeout=5):
-    """Ultra-fast price-only fetch for live pulse"""
     cached = live_price_get(ticker)
     if cached:
         return cached
@@ -218,72 +207,6 @@ def fetch_many(ticker_map, timeout=12):
         if name not in result:
             result[name] = {"error": "timeout"}
     return result
-
-# ─────────────────────────────────────────────────────────────
-# BACKGROUND PREFETCH + LIVE REFRESH
-# ─────────────────────────────────────────────────────────────
-def _prefetch_all():
-    print("[FinVision] Prefetching market data in background...")
-    try:
-        d = fetch_many(INDIAN_INDICES, timeout=20)
-        cache_set("india_indices", d)
-        print("[FinVision] ✓ Indian indices loaded")
-    except: pass
-    try:
-        d = fetch_many(GLOBAL_INDICES, timeout=20)
-        cache_set("global_indices", d)
-        print("[FinVision] ✓ Global indices loaded")
-    except: pass
-    try:
-        d = fetch_many(BONDS_AND_COMMODITIES, timeout=20)
-        cache_set("bonds", d)
-        print("[FinVision] ✓ Bonds & commodities loaded")
-    except: pass
-    try:
-        d = fetch_many(FOREX_PAIRS, timeout=15)
-        cache_set("forex", d)
-        print("[FinVision] ✓ Forex loaded")
-    except: pass
-    try:
-        d = fetch_many(POPULAR_INDIAN_STOCKS, timeout=25)
-        for name, ticker in POPULAR_INDIAN_STOCKS.items():
-            if name in d: d[name]["ticker"] = ticker
-        cache_set("india_stocks", d)
-        print("[FinVision] ✓ Indian stocks loaded")
-    except: pass
-    try:
-        d = fetch_many(POPULAR_GLOBAL_STOCKS, timeout=20)
-        for name, ticker in POPULAR_GLOBAL_STOCKS.items():
-            if name in d: d[name]["ticker"] = ticker
-        cache_set("global_stocks", d)
-        print("[FinVision] ✓ Global stocks loaded")
-    except: pass
-    print("[FinVision] ✓ All data prefetched!")
-
-def _live_pulse_refresh():
-    """Refresh live prices for key tickers every 5 seconds"""
-    while True:
-        time.sleep(5)
-        try:
-            with ThreadPoolExecutor(max_workers=8) as ex:
-                futures = {ex.submit(_fetch_live_price_only, ticker, 4): (name, ticker)
-                           for name, ticker in ALL_LIVE_TICKERS.items()}
-                for fut in as_completed(futures, timeout=8):
-                    pass
-        except: pass
-
-def _background_refresh():
-    while True:
-        time.sleep(60)
-        try: _prefetch_all()
-        except: pass
-
-_pf_thread = threading.Thread(target=_prefetch_all, daemon=True)
-_pf_thread.start()
-_live_thread = threading.Thread(target=_live_pulse_refresh, daemon=True)
-_live_thread.start()
-_refresh_thread = threading.Thread(target=_background_refresh, daemon=True)
-_refresh_thread.start()
 
 # ─────────────────────────────────────────────────────────────
 # DATA HELPERS
@@ -423,13 +346,9 @@ def _technical_analysis(ticker):
             elif cl[i] < cl[i - 1]: obv_val -= vl[i]
             obv.append(obv_val)
         obv_trend = "Rising" if len(obv) > 5 and obv[-1] > obv[-5] else "Falling"
-
-        # Stochastic oscillator
         low14 = hist["Low"].rolling(14).min()
         high14 = hist["High"].rolling(14).max()
         stoch_k = float(((hist["Close"] - low14) / (high14 - low14) * 100).iloc[-1])
-
-        # ATR (Average True Range) for volatility
         high = hist["High"].astype(float)
         low_col = hist["Low"].astype(float)
         tr = pd.DataFrame({
@@ -439,12 +358,9 @@ def _technical_analysis(ticker):
         }).max(axis=1)
         atr = float(tr.rolling(14).mean().iloc[-1])
         atr_pct = safe_float(atr / curr * 100, 2)
-
-        # 52-week position
         year_high = float(close.tail(252).max())
         year_low = float(close.tail(252).min())
         week52_pos = safe_float((curr - year_low) / (year_high - year_low) * 100 if year_high != year_low else 50, 1)
-
         score = 50
         if curr > ma20: score += 8
         if curr > ma50: score += 8
@@ -455,7 +371,6 @@ def _technical_analysis(ticker):
         if vol_ratio > 1.2: score += 5
         if obv_trend == "Rising": score += 10
         score = min(100, max(0, score))
-
         signals = []
         signals.append("Above MA20 ▲" if curr > ma20 else "Below MA20 ▼")
         signals.append("Above MA50 ▲" if curr > ma50 else "Below MA50 ▼")
@@ -466,7 +381,6 @@ def _technical_analysis(ticker):
         if vol_ratio > 1.5: signals.append(f"High Volume {vol_ratio:.1f}x ⚡")
         if stoch_k < 20: signals.append("Stoch Oversold 🟢")
         elif stoch_k > 80: signals.append("Stoch Overbought 🔴")
-
         return {
             "current_price": safe_float(curr),
             "ma20": safe_float(ma20), "ma50": safe_float(ma50), "ma200": safe_float(ma200),
@@ -486,23 +400,10 @@ def _technical_analysis(ticker):
 # FUTURE PERFORMANCE ENGINE — 8-Factor AI Score
 # ─────────────────────────────────────────────────────────────
 def _future_performance(ticker):
-    """
-    8-Factor Future Performance Prediction Engine:
-    1. Analyst Consensus Score (28%)
-    2. Earnings & Revenue Growth Trajectory (20%)
-    3. Valuation vs Growth (PEG, Forward PE) (15%)
-    4. Financial Health (FCF, D/E, Current Ratio) (12%)
-    5. Technical Momentum (RSI, MACD, MA alignment) (10%)
-    6. Institutional Confidence (Ownership trends) (8%)
-    7. 52-Week Position & Mean Reversion (4%)
-    8. Short Interest (Risk factor) (3%)
-    """
     try:
         info = yf.Ticker(ticker).info or {}
         sc = {}
         details = {}
-
-        # ── Factor 1: Analyst Consensus ──
         rec = info.get("recommendationKey", "").lower()
         analyst_score = {"strong_buy": 95, "buy": 78, "hold": 52, "sell": 28, "strong_sell": 10}.get(rec, 50)
         target = safe_float(info.get("targetMeanPrice"))
@@ -517,8 +418,6 @@ def _future_performance(ticker):
         details["analyst_upside_pct"] = upside
         details["analyst_count"] = info.get("numberOfAnalystOpinions", 0) or 0
         details["recommendation"] = rec.replace("_", " ").title() if rec else "N/A"
-
-        # ── Factor 2: Earnings & Revenue Growth ──
         eg = info.get("earningsGrowth")
         rg = info.get("revenueGrowth")
         eg_score = 90 if eg and eg > 0.30 else 78 if eg and eg > 0.15 else 65 if eg and eg > 0.05 else 52 if eg and eg > 0 else 30 if eg else 50
@@ -527,8 +426,6 @@ def _future_performance(ticker):
         details["earnings_growth_pct"] = safe_float(eg * 100, 1) if eg else None
         details["revenue_growth_pct"] = safe_float(rg * 100, 1) if rg else None
         details["earnings_qoq"] = safe_float(info.get("earningsQuarterlyGrowth", 0) * 100, 1) if info.get("earningsQuarterlyGrowth") else None
-
-        # ── Factor 3: Valuation vs Growth (PEG-based) ──
         fpe = info.get("forwardPE")
         tpe = info.get("trailingPE")
         peg = info.get("pegRatio")
@@ -542,8 +439,6 @@ def _future_performance(ticker):
         details["trailing_pe"] = safe_float(tpe, 2) if tpe else None
         details["peg_ratio"] = safe_float(peg, 2) if peg else None
         details["pe_expansion"] = "Positive (Earnings catching up)" if (fpe and tpe and fpe < tpe) else "Negative" if (fpe and tpe) else "N/A"
-
-        # ── Factor 4: Financial Health ──
         de = info.get("debtToEquity")
         cr = info.get("currentRatio")
         fcf = info.get("freeCashflow")
@@ -559,8 +454,6 @@ def _future_performance(ticker):
         details["current_ratio"] = safe_float(cr, 2) if cr else None
         details["free_cashflow_b"] = round(fcf / 1e9, 2) if fcf else None
         details["profit_margin_pct"] = safe_float(pm * 100, 1) if pm else None
-
-        # ── Factor 5: Technical Momentum ──
         try:
             hist = yf.Ticker(ticker).history(period="6mo", auto_adjust=True, timeout=8)
             if not hist.empty and len(hist) >= 50:
@@ -577,13 +470,13 @@ def _future_performance(ticker):
                 ema26 = close.ewm(span=26).mean()
                 macd_v = float((ema12 - ema26).iloc[-1])
                 sig_v = float((ema12 - ema26).ewm(span=9).mean().iloc[-1])
-                ts = 50
-                if last > ma50: ts += 12
-                if last > ma200: ts += 15
-                if macd_v > sig_v: ts += 13
-                if 40 < rsi_v < 65: ts += 10
-                elif rsi_v > 65: ts += 5
-                sc["technical"] = min(100, max(0, ts))
+                ts_score = 50
+                if last > ma50: ts_score += 12
+                if last > ma200: ts_score += 15
+                if macd_v > sig_v: ts_score += 13
+                if 40 < rsi_v < 65: ts_score += 10
+                elif rsi_v > 65: ts_score += 5
+                sc["technical"] = min(100, max(0, ts_score))
                 details["rsi"] = safe_float(rsi_v, 1)
                 details["macd_signal"] = "Bullish" if macd_v > sig_v else "Bearish"
                 details["price_vs_ma50"] = safe_float((last - ma50) / ma50 * 100, 1)
@@ -591,21 +484,16 @@ def _future_performance(ticker):
                 sc["technical"] = 50
         except:
             sc["technical"] = 50
-
-        # ── Factor 6: Institutional Confidence ──
         ins = info.get("heldPercentInsiders", 0) or 0
         inst = info.get("heldPercentInstitutions", 0) or 0
         ows = 50 + (20 if ins > 0.10 else 10 if ins > 0.05 else 0) + (20 if inst > 0.70 else 12 if inst > 0.50 else 0) + (5 if inst > 0.85 else 0)
         sc["ownership"] = min(100, ows)
         details["insider_pct"] = safe_float(ins * 100, 1)
         details["institution_pct"] = safe_float(inst * 100, 1)
-
-        # ── Factor 7: 52W Position & Mean Reversion ──
         wh = info.get("fiftyTwoWeekHigh")
         wl = info.get("fiftyTwoWeekLow")
         if wh and wl and curr and wh != wl:
             pos = (curr - wl) / (wh - wl) * 100
-            # Moderate position (30-70%) is ideal — not too overbought, not collapsing
             pos_score = 80 if 30 < pos < 70 else 65 if 15 < pos <= 30 else 70 if 70 <= pos < 85 else 45 if pos >= 85 else 40
             sc["position"] = pos_score
             details["week52_position_pct"] = safe_float(pos, 1)
@@ -614,29 +502,22 @@ def _future_performance(ticker):
             details["week52_position_pct"] = None
         details["week52_high"] = safe_float(wh) if wh else None
         details["week52_low"] = safe_float(wl) if wl else None
-
-        # ── Factor 8: Short Interest Risk ──
         sr = info.get("shortRatio", 0) or 0
         sc["short"] = 88 if sr < 1.5 else 72 if sr < 3 else 55 if sr < 5 else 35 if sr < 8 else 15
         details["short_ratio"] = safe_float(sr, 2)
         details["dividend_yield_pct"] = safe_float((info.get("dividendYield") or 0) * 100, 2)
         details["payout_ratio_pct"] = safe_float((info.get("payoutRatio") or 0) * 100, 1)
-
-        # ── Composite Weighted Score ──
         weights = {
             "analyst": 0.28, "growth": 0.20, "valuation": 0.15,
             "health": 0.12, "technical": 0.10, "ownership": 0.08,
             "position": 0.04, "short": 0.03
         }
         comp = round(sum(sc[k] * weights[k] for k in weights), 1)
-
         if comp >= 78: grade, gc = "Strong Buy", "green"
         elif comp >= 63: grade, gc = "Buy", "lightgreen"
         elif comp >= 48: grade, gc = "Hold", "yellow"
         elif comp >= 33: grade, gc = "Underperform", "orange"
         else: grade, gc = "Sell", "red"
-
-        # ── Price Scenarios (1-year) ──
         scenarios = {}
         base_upside = (upside / 100) if upside is not None else 0.08
         if curr:
@@ -648,14 +529,11 @@ def _future_performance(ticker):
                 "label_base": f"+{max(base_upside*70, 5):.0f}%",
                 "label_bear": "-15%",
             }
-
-        # ── Time Horizon Signals ──
         horizon = {
             "short_term": "Bullish" if sc.get("technical", 50) > 65 else "Bearish" if sc.get("technical", 50) < 40 else "Neutral",
             "medium_term": "Bullish" if sc.get("growth", 50) > 65 and sc.get("valuation", 50) > 55 else "Bearish" if sc.get("growth", 50) < 40 else "Neutral",
             "long_term": grade if comp >= 48 else "Underperform",
         }
-
         return {
             "composite_score": comp,
             "grade": grade,
@@ -963,13 +841,11 @@ def api_stock(ticker):
 
 @app.route("/api/live-pulse")
 def api_live_pulse():
-    """Fast endpoint: returns latest prices for all key tickers (for auto-refresh)"""
     tickers_param = request.args.get("tickers", "")
     if tickers_param:
         tickers = [t.strip() for t in tickers_param.split(",") if t.strip()]
     else:
         tickers = list(ALL_LIVE_TICKERS.values())[:20]
-
     result = {}
     with ThreadPoolExecutor(max_workers=12) as ex:
         futures = {ex.submit(_fetch_live_price_only, t, 4): t for t in tickers[:25]}
@@ -993,7 +869,7 @@ def api_search(query):
     return jsonify(_search_stock(query))
 
 # ─────────────────────────────────────────────────────────────
-# FRONTEND HTML — v5
+# FRONTEND HTML
 # ─────────────────────────────────────────────────────────────
 def _skel_rows(n=4):
     return ''.join(
@@ -1012,7 +888,7 @@ _HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">
-<title>FinVision v5 — Live Auto-Refresh Market Analyzer</title>
+<title>FinVision v5 — Live Market Analyzer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Exo+2:wght@300;400;600;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -1063,14 +939,10 @@ header{position:sticky;top:0;z-index:500;height:52px;display:flex;align-items:ce
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.1}}
 .hclk{font-family:'Share Tech Mono',monospace;font-size:.6rem;color:var(--t2);white-space:nowrap;display:none}
 @media(min-width:700px){.hclk{display:block}}
-
-/* LIVE PULSE — number flash animation */
 @keyframes flash-up{0%{background:rgba(0,255,136,.3)}100%{background:transparent}}
 @keyframes flash-dn{0%{background:rgba(255,34,68,.3)}100%{background:transparent}}
 .flash-up{animation:flash-up .6s ease-out}
 .flash-dn{animation:flash-dn .6s ease-out}
-
-/* Auto-refresh indicator */
 .refresh-ring{position:fixed;bottom:1.1rem;right:1.1rem;z-index:900;
   width:36px;height:36px;border-radius:50%;cursor:pointer;
   background:rgba(0,229,255,.07);border:1.5px solid rgba(0,229,255,.2);
@@ -1081,7 +953,6 @@ header{position:sticky;top:0;z-index:500;height:52px;display:flex;align-items:ce
 .rring-fill{fill:none;stroke:var(--c);stroke-width:2.5;stroke-linecap:round;
   stroke-dasharray:100;stroke-dashoffset:100;transition:stroke-dashoffset .3s linear}
 .rring-icon{font-size:.8rem;position:relative;z-index:1}
-
 .tape{background:var(--s1);border-bottom:1px solid var(--border);overflow:hidden;position:relative;height:26px;display:flex;align-items:center}
 .tape::before,.tape::after{content:'';position:absolute;top:0;bottom:0;width:50px;z-index:2;pointer-events:none}
 .tape::before{left:0;background:linear-gradient(90deg,var(--s1),transparent)}
@@ -1180,8 +1051,6 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
 .gauge-n{font-family:'Share Tech Mono',monospace;font-size:1.6rem;font-weight:700}
 .gauge-l{font-size:.5rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--t2)}
 .gpill{margin-top:.4rem;padding:2px 11px;border-radius:15px;font-size:.67rem;font-weight:700}
-
-/* FUTURE PERFORMANCE CARDS */
 .fp-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:.5rem;margin-bottom:.9rem}
 @media(min-width:560px){.fp-grid{grid-template-columns:repeat(4,1fr)}}
 @media(min-width:860px){.fp-grid{grid-template-columns:repeat(8,1fr)}}
@@ -1192,12 +1061,10 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
 .fp-wt{font-size:.48rem;color:var(--t3);margin-top:1px}
 .fp-bar{height:3px;border-radius:2px;margin-top:.25rem;background:var(--border)}
 .fp-bar-fill{height:100%;border-radius:2px;transition:width .8s ease}
-
 .horizon-row{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:.9rem}
 .hz{flex:1;min-width:100px;background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:.6rem .8rem;text-align:center}
 .hz-lbl{font-size:.52rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--t2);margin-bottom:.3rem}
 .hz-val{font-size:.82rem;font-weight:700;font-family:'Rajdhani',sans-serif}
-
 .sc-row{display:flex;align-items:center;gap:.5rem;padding:.3rem 0}
 .sc-lbl{font-size:.62rem;font-weight:700;width:42px;flex-shrink:0;text-transform:uppercase;letter-spacing:.6px}
 .sc-bar{flex:1;background:rgba(255,255,255,.04);border-radius:4px;height:20px;overflow:hidden}
@@ -1253,29 +1120,18 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   padding:.5rem 1rem;border-radius:8px;cursor:pointer;font-family:'Rajdhani',sans-serif;font-weight:700;font-size:.8rem;
   flex-shrink:0;transition:opacity .2s;letter-spacing:.5px}
 .chsend:hover{opacity:.85}.chsend:disabled{opacity:.3;cursor:not-allowed}
-.scrow{display:flex;align-items:center;gap:.5rem;padding:.28rem 0}
-.sc-lbl2{font-size:.65rem;color:var(--t2);flex:0 0 130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-@media(max-width:480px){.sc-lbl2{flex:0 0 90px;font-size:.58rem}}
-.sc-track{flex:1;background:rgba(255,255,255,.04);border-radius:3px;height:5px;overflow:hidden}
-.sc-fill2{height:100%;border-radius:3px}
-.sc-num{font-family:'Share Tech Mono',monospace;font-size:.62rem;width:28px;text-align:right;flex-shrink:0}
-
-/* live pulse value elements */
 [data-live]{transition:color .3s}
 </style>
 </head>
 <body>
 <div class="gridbg"></div>
-
-<!-- Auto-refresh ring indicator -->
-<div class="refresh-ring" id="rring" title="Auto-refresh active — click to force refresh" onclick="forceRefresh()">
+<div class="refresh-ring" id="rring" title="Auto-refresh active" onclick="forceRefresh()">
   <svg class="rring-svg" viewBox="0 0 36 36">
     <circle class="rring-track" cx="18" cy="18" r="15"/>
     <circle class="rring-fill" id="rring-fill" cx="18" cy="18" r="15"/>
   </svg>
   <span class="rring-icon">⟳</span>
 </div>
-
 <header>
   <div class="logo">Fin<span style="-webkit-text-fill-color:var(--gold)">Vision</span><sub>v5</sub></div>
   <div class="hsearch" id="hsw">
@@ -1301,7 +1157,6 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   <button class="tab" onclick="go('chat',this)">🤖 AI Chat</button>
 </nav>
 <main>
-<!-- OVERVIEW -->
 <div id="panel-overview" class="panel on">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.2rem;flex-wrap:wrap;gap:.5rem">
     <div class="ph">Market <span>Overview</span></div>
@@ -1314,32 +1169,29 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   <div class="g2" style="margin-bottom:.9rem">
     <div class="card">
       <div class="ctitle">🇮🇳 Indian Indices <span style="font-size:.5rem;color:var(--g);margin-left:4px;letter-spacing:0">● LIVE</span></div>
-      <div id="ov-india">""" + _skel_rows(6) + r"""</div>
+      <div id="ov-india">SKEL_ROWS_6</div>
     </div>
     <div class="card">
       <div class="ctitle">🌍 Global Indices <span style="font-size:.5rem;color:var(--g);margin-left:4px;letter-spacing:0">● LIVE</span></div>
-      <div id="ov-global">""" + _skel_rows(6) + r"""</div>
+      <div id="ov-global">SKEL_ROWS_6</div>
     </div>
   </div>
   <div class="g3">
-    <div class="card"><div class="ctitle">🥇 Commodities &amp; Crypto</div><div id="ov-bonds">""" + _skel_rows(5) + r"""</div></div>
-    <div class="card"><div class="ctitle">💱 Key Forex</div><div id="ov-forex">""" + _skel_rows(4) + r"""</div></div>
-    <div class="card"><div class="ctitle">📰 Headlines</div><div id="ov-news">""" + _skel_rows(4) + r"""</div></div>
+    <div class="card"><div class="ctitle">🥇 Commodities &amp; Crypto</div><div id="ov-bonds">SKEL_ROWS_5</div></div>
+    <div class="card"><div class="ctitle">💱 Key Forex</div><div id="ov-forex">SKEL_ROWS_4</div></div>
+    <div class="card"><div class="ctitle">📰 Headlines</div><div id="ov-news">SKEL_ROWS_4</div></div>
   </div>
 </div>
-<!-- WORLD -->
 <div id="panel-world" class="panel">
   <div class="ph">🌍 World <span>Trend</span></div>
   <p class="ps">Global breadth · Sentiment · VIX · Fear gauge</p>
   <div id="wc"><div class="ldc"><div class="spin"></div> Loading world data…</div></div>
 </div>
-<!-- INDIA -->
 <div id="panel-india" class="panel">
   <div class="ph">🇮🇳 India <span>Trend</span></div>
   <p class="ps">NIFTY · SENSEX · Sectors · Stocks · INR</p>
   <div id="ic-main"><div class="ldc"><div class="spin"></div> Loading India data…</div></div>
 </div>
-<!-- SECTORS -->
 <div id="panel-sectors" class="panel">
   <div class="ph">📂 Sector <span>Analysis</span></div>
   <p class="ps">Global ETFs &amp; Indian sector performance</p>
@@ -1350,25 +1202,21 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   </div>
   <div id="sec-c"><div class="ldc"><div class="spin"></div> Loading sectors…</div></div>
 </div>
-<!-- BONDS -->
 <div id="panel-bonds" class="panel">
   <div class="ph">📈 Bonds <span>&amp; Crypto</span></div>
   <p class="ps">Gold · Oil · Bitcoin · Ethereum · Treasuries</p>
-  <div class="g5" id="bonds-g"><div class="ldc" style="grid-column:1/-1">""" + _skel_ic(8) + r"""</div></div>
+  <div class="g5" id="bonds-g"><div class="ldc" style="grid-column:1/-1">SKEL_IC_8</div></div>
 </div>
-<!-- FOREX -->
 <div id="panel-forex" class="panel">
   <div class="ph">💱 <span>Forex</span></div>
   <p class="ps">USD/INR &amp; major pairs · Live rates</p>
-  <div class="g5" id="forex-g"><div class="ldc" style="grid-column:1/-1">""" + _skel_ic(6) + r"""</div></div>
+  <div class="g5" id="forex-g"><div class="ldc" style="grid-column:1/-1">SKEL_IC_6</div></div>
 </div>
-<!-- NEWS -->
 <div id="panel-news" class="panel">
   <div class="ph">📰 Market <span>News</span></div>
   <p class="ps">Yahoo Finance · Economic Times · Live headlines</p>
   <div class="card" id="news-c"><div class="ldc"><div class="spin"></div> Fetching news…</div></div>
 </div>
-<!-- AI CHAT -->
 <div id="panel-chat" class="panel">
   <div class="ph">🤖 AI <span>Analyst</span></div>
   <p class="ps">8-Factor Future Score · Live data · Koi bhi language</p>
@@ -1415,14 +1263,12 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   </div>
 </div>
 </main>
-<!-- MODAL -->
 <div class="moverlay" id="moverlay">
   <div class="modal">
     <button class="mclose" onclick="closeMod()">✕</button>
     <div id="mcont"><div class="ldc"><div class="spin"></div> Loading full analysis…</div></div>
   </div>
 </div>
-
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
@@ -1431,12 +1277,8 @@ const fp=n=>n!=null?`${Number(n)>0?'+':''}${f(n)}%`:'—';
 const pc=n=>Number(n)>0?'up':Number(n)<0?'dn':'neu';
 const bdg=n=>`<span class="bdg ${Number(n)>0?'bu':Number(n)<0?'bd':'bn'}">${fp(n)}</span>`;
 const api=url=>fetch(url).then(r=>r.json()).catch(()=>({}));
-
-// ── Clock ──
 const tick=()=>{$('clk').textContent=new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour12:true,hour:'2-digit',minute:'2-digit',second:'2-digit',day:'2-digit',month:'short'})+' IST'};
 setInterval(tick,1000);tick();
-
-// ── Search ──
 let _hsT=null;
 function hsSearch(v){
   clearTimeout(_hsT);const drop=$('sdrop');
@@ -1462,8 +1304,6 @@ function hsAnalyze(){
   $('chin').value=`Full 8-factor future analysis of ${v}`;chat();
 }
 document.addEventListener('click',e=>{if(!$('hsw').contains(e.target))$('sdrop').classList.remove('show');});
-
-// ── Panel switching ──
 const _loaded={};
 function go(name,btn){
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
@@ -1471,18 +1311,10 @@ function go(name,btn){
   $(`panel-${name}`).classList.add('on');btn.classList.add('on');
   if(!_loaded[name]){_loaded[name]=true;({world:loadWorld,india:loadIndia,sectors:loadSectors,bonds:loadBonds,forex:loadForex,news:loadNews})[name]?.();}
 }
-
-// ─────────────────────────────────────────────────────────────
-// LIVE PULSE AUTO-REFRESH ENGINE
-// ─────────────────────────────────────────────────────────────
-let _liveData = {};          // ticker -> {price, change, change_pct}
-let _liveNameMap = {};       // display name -> ticker
-let _pulseInterval = null;
-let _ringProgress = 0;
-const PULSE_INTERVAL = 5000; // 5 seconds
-
-// Build name->ticker map for all known indices
-const _ALL_TICKERS = {
+let _liveData={};
+let _pulseInterval=null;
+const PULSE_INTERVAL=5000;
+const _ALL_TICKERS={
   "NIFTY 50":"^NSEI","SENSEX":"^BSESN","NIFTY BANK":"^NSEBANK",
   "NIFTY IT":"^CNXIT","NIFTY AUTO":"^CNXAUTO","NIFTY PHARMA":"^CNXPHARMA",
   "NIFTY FMCG":"^CNXFMCG","NIFTY METAL":"^CNXMETAL","NIFTY REALTY":"^CNXREALTY",
@@ -1491,127 +1323,92 @@ const _ALL_TICKERS = {
   "Gold":"GC=F","Bitcoin":"BTC-USD","Crude Oil (WTI)":"CL=F","Ethereum":"ETH-USD",
   "USD/INR":"USDINR=X"
 };
-
 function startPulse(){
-  if(_pulseInterval) clearInterval(_pulseInterval);
+  if(_pulseInterval)clearInterval(_pulseInterval);
   pulseFetch();
-  _pulseInterval = setInterval(pulseFetch, PULSE_INTERVAL);
+  _pulseInterval=setInterval(pulseFetch,PULSE_INTERVAL);
   animateRing();
 }
-
 async function pulseFetch(){
-  const tickers = Object.values(_ALL_TICKERS).join(',');
-  try {
-    const data = await fetch(`/api/live-pulse?tickers=${encodeURIComponent(tickers)}`).then(r=>r.json());
-    if(!data || !data.prices) return;
-    const prices = data.prices;
-    // Update _liveData and flash changed elements
-    for(const [name, ticker] of Object.entries(_ALL_TICKERS)){
-      const fresh = prices[ticker];
-      if(!fresh) continue;
-      const old = _liveData[ticker];
-      const changed = !old || old.price !== fresh.price;
-      _liveData[ticker] = fresh;
-      if(changed && old) {
-        flashLiveElements(ticker, fresh, old);
-      }
+  const tickers=Object.values(_ALL_TICKERS).join(',');
+  try{
+    const data=await fetch(`/api/live-pulse?tickers=${encodeURIComponent(tickers)}`).then(r=>r.json());
+    if(!data||!data.prices)return;
+    const prices=data.prices;
+    for(const[name,ticker]of Object.entries(_ALL_TICKERS)){
+      const fresh=prices[ticker];
+      if(!fresh)continue;
+      const old=_liveData[ticker];
+      const changed=!old||old.price!==fresh.price;
+      _liveData[ticker]=fresh;
+      if(changed&&old)flashLiveElements(ticker,fresh,old);
     }
     updateLiveDOM();
-    $('last-refresh-lbl').textContent = 'Updated ' + new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
-  } catch(e){}
+    $('last-refresh-lbl').textContent='Updated '+new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:true});
+  }catch(e){}
 }
-
-function flashLiveElements(ticker, fresh, old){
-  const dir = fresh.price > old.price ? 'up' : fresh.price < old.price ? 'dn' : null;
-  if(!dir) return;
-  const cls = dir === 'up' ? 'flash-up' : 'flash-dn';
+function flashLiveElements(ticker,fresh,old){
+  const dir=fresh.price>old.price?'up':fresh.price<old.price?'dn':null;
+  if(!dir)return;
+  const cls=dir==='up'?'flash-up':'flash-dn';
   document.querySelectorAll(`[data-live="${ticker}"]`).forEach(el=>{
     el.classList.remove('flash-up','flash-dn');
-    el.offsetWidth; // reflow
+    el.offsetWidth;
     el.classList.add(cls);
     setTimeout(()=>el.classList.remove(cls),700);
   });
 }
-
 function updateLiveDOM(){
-  // Update overview India indices
-  const indiaKeys = ["NIFTY 50","SENSEX","NIFTY BANK","NIFTY IT","NIFTY AUTO","NIFTY PHARMA","NIFTY FMCG","NIFTY METAL","NIFTY REALTY"];
-  const globalKeys = ["S&P 500","NASDAQ","Dow Jones","FTSE 100","DAX","Nikkei 225","Hang Seng"];
-
-  indiaKeys.forEach(nm=>{
-    const tk = _ALL_TICKERS[nm]; if(!tk) return;
-    const d = _liveData[tk]; if(!d) return;
-    const el = document.querySelector(`[data-live-row="${tk}"]`);
-    if(el) {
-      const c = pc(d.change_pct);
-      el.querySelector('.sv').innerHTML = `${f(d.price)} <span class="${c}" data-live="${tk}">${fp(d.change_pct)}</span>`;
-    }
+  const indiaKeys=["NIFTY 50","SENSEX","NIFTY BANK","NIFTY IT","NIFTY AUTO","NIFTY PHARMA","NIFTY FMCG","NIFTY METAL","NIFTY REALTY"];
+  const globalKeys=["S&P 500","NASDAQ","Dow Jones","FTSE 100","DAX","Nikkei 225","Hang Seng"];
+  [...indiaKeys,...globalKeys].forEach(nm=>{
+    const tk=_ALL_TICKERS[nm];if(!tk)return;
+    const d=_liveData[tk];if(!d)return;
+    const el=document.querySelector(`[data-live-row="${tk}"]`);
+    if(el){const c=pc(d.change_pct);el.querySelector('.sv').innerHTML=`${f(d.price)} <span class="${c}" data-live="${tk}">${fp(d.change_pct)}</span>`;}
   });
-  globalKeys.forEach(nm=>{
-    const tk = _ALL_TICKERS[nm]; if(!tk) return;
-    const d = _liveData[tk]; if(!d) return;
-    const el = document.querySelector(`[data-live-row="${tk}"]`);
-    if(el){
-      const c = pc(d.change_pct);
-      el.querySelector('.sv').innerHTML = `${f(d.price)} <span class="${c}" data-live="${tk}">${fp(d.change_pct)}</span>`;
-    }
-  });
-  // Update tape
   updateTapeLive();
 }
-
 function updateTapeLive(){
-  const tapeEl = $('tape');
-  if(!tapeEl) return;
-  const items = Object.entries(_ALL_TICKERS).map(([nm,tk])=>{
-    const d = _liveData[tk]; if(!d || !d.price) return null;
-    const c = pc(d.change_pct);
+  const tapeEl=$('tape');if(!tapeEl)return;
+  const items=Object.entries(_ALL_TICKERS).map(([nm,tk])=>{
+    const d=_liveData[tk];if(!d||!d.price)return null;
+    const c=pc(d.change_pct);
     return `<span class="ti" data-live="${tk}"><span class="tn">${nm}</span> <span class="tp">${f(d.price)}</span> <span class="${c}">${fp(d.change_pct)}</span></span>`;
   }).filter(Boolean);
-  if(items.length) tapeEl.innerHTML = items.join('') + items.join('');
+  if(items.length)tapeEl.innerHTML=items.join('')+items.join('');
 }
-
-// Ring animation
 function animateRing(){
-  const circumference = 2 * Math.PI * 15; // r=15
-  const fill = $('rring-fill');
-  if(!fill) return;
-  fill.style.strokeDasharray = circumference;
-  fill.style.strokeDashoffset = circumference;
-  let start = null;
+  const circumference=2*Math.PI*15;
+  const fill=$('rring-fill');if(!fill)return;
+  fill.style.strokeDasharray=circumference;
+  fill.style.strokeDashoffset=circumference;
+  let start=null;
   function step(ts){
-    if(!start) start = ts;
-    const elapsed = ts - start;
-    const progress = Math.min(elapsed / PULSE_INTERVAL, 1);
-    fill.style.strokeDashoffset = circumference * (1 - progress);
-    if(progress < 1) requestAnimationFrame(step);
-    else { start = null; requestAnimationFrame(step); }
+    if(!start)start=ts;
+    const elapsed=ts-start;
+    const progress=Math.min(elapsed/PULSE_INTERVAL,1);
+    fill.style.strokeDashoffset=circumference*(1-progress);
+    if(progress<1)requestAnimationFrame(step);
+    else{start=null;requestAnimationFrame(step);}
   }
   requestAnimationFrame(step);
 }
-
 function forceRefresh(){pulseFetch();}
-
-// ─────────────────────────────────────────────────────────────
-// OVERVIEW
-// ─────────────────────────────────────────────────────────────
 async function loadOverview(){
   loadTape();
   const[india,global,bonds,forex,news]=await Promise.all([
     api('/api/indices/india'),api('/api/indices/global'),
     api('/api/bonds'),api('/api/forex'),api('/api/news')
   ]);
-  // Render India with live-row data attributes
   $('ov-india').innerHTML=Object.entries(india).map(([n,v])=>{
     if(!v||!v.price)return'';
-    const tk = _ALL_TICKERS[n] || '';
-    const c=pc(v.change_pct);
+    const tk=_ALL_TICKERS[n]||'';const c=pc(v.change_pct);
     return `<div class="sr" data-live-row="${tk}"><span class="sl">${n}</span><span class="sv">${f(v.price)} <span class="${c}" data-live="${tk}">${fp(v.change_pct)}</span></span></div>`;
   }).join('')||err();
   $('ov-global').innerHTML=Object.entries(global).map(([n,v])=>{
     if(!v||!v.price)return'';
-    const tk = _ALL_TICKERS[n] || '';
-    const c=pc(v.change_pct);
+    const tk=_ALL_TICKERS[n]||'';const c=pc(v.change_pct);
     return `<div class="sr" data-live-row="${tk}"><span class="sl">${n}</span><span class="sv">${f(v.price)} <span class="${c}" data-live="${tk}">${fp(v.change_pct)}</span></span></div>`;
   }).join('')||err();
   const bkeys=['Gold','Silver','Crude Oil (WTI)','Bitcoin','Ethereum','Solana'];
@@ -1629,29 +1426,21 @@ async function loadOverview(){
       <div class="ntitle"><a class="nlink" href="${n.url}" target="_blank" rel="noopener">${n.title}</a></div>
       <div class="nmeta">${n.source} · ${n.time}</div></div></div>`
   ).join('')||err('No news');
-  // Seed _liveData from loaded data
-  for(const [n,v] of Object.entries({...india,...global})){
-    const tk = _ALL_TICKERS[n]; if(tk && v && v.price) _liveData[tk] = v;
+  for(const[n,v]of Object.entries({...india,...global})){
+    const tk=_ALL_TICKERS[n];if(tk&&v&&v.price)_liveData[tk]=v;
   }
   startPulse();
 }
-
 async function loadTape(){
   const[a,b]=await Promise.all([api('/api/indices/india'),api('/api/indices/global')]);
   const all={...a,...b};
   const items=Object.entries(all).filter(([,v])=>v&&v.price).map(([nm,d])=>{
-    const c=pc(d.change_pct);
-    const tk = _ALL_TICKERS[nm] || '';
+    const c=pc(d.change_pct);const tk=_ALL_TICKERS[nm]||'';
     return `<span class="ti" data-live="${tk}"><span class="tn">${nm}</span> <span class="tp">${f(d.price)}</span> <span class="${c}">${fp(d.change_pct)}</span></span>`;
   });
   if(items.length)$('tape').innerHTML=items.join('')+items.join('');
 }
-
 const err=(msg='No data available')=>`<p style="color:var(--t2);font-size:.75rem;padding:.3rem">${msg}</p>`;
-
-// ─────────────────────────────────────────────────────────────
-// WORLD
-// ─────────────────────────────────────────────────────────────
 async function loadWorld(){
   $('wc').innerHTML='<div class="ldc"><div class="spin"></div> Fetching global data…</div>';
   const d=await api('/api/world-trend');
@@ -1681,10 +1470,6 @@ async function loadWorld(){
     </div>
     <div class="card"><div class="ctitle">All Global Indices</div><div class="g4">${iH}</div></div>`;
 }
-
-// ─────────────────────────────────────────────────────────────
-// INDIA
-// ─────────────────────────────────────────────────────────────
 async function loadIndia(){
   $('ic-main').innerHTML='<div class="ldc"><div class="spin"></div> Fetching India data…</div>';
   const[trend,stocks]=await Promise.all([api('/api/india-trend'),api('/api/stocks/india')]);
@@ -1731,10 +1516,6 @@ async function loadIndia(){
       </tr></thead><tbody>${tH}</tbody></table></div>
     </div>`;
 }
-
-// ─────────────────────────────────────────────────────────────
-// SECTORS
-// ─────────────────────────────────────────────────────────────
 let _secData=null,_secP='week';
 async function loadSectors(){
   $('sec-c').innerHTML='<div class="ldc"><div class="spin"></div> Loading sectors…</div>';
@@ -1770,10 +1551,6 @@ function renderSectors(){
   };
   $('sec-c').innerHTML=tcard+rl(global,'🌍 Global Sector ETFs')+rl(indian,'🇮🇳 Indian Sector Indices');
 }
-
-// ─────────────────────────────────────────────────────────────
-// BONDS / FOREX / NEWS
-// ─────────────────────────────────────────────────────────────
 async function loadBonds(){
   const d=await api('/api/bonds');
   $('bonds-g').innerHTML=Object.entries(d).map(([n,v])=>{
@@ -1798,10 +1575,6 @@ async function loadNews(){
       <div class="nmeta">${n.source} · ${n.time}</div></div></div>`
   ).join('')||'<p style="color:var(--t2);padding:.5rem">No news scraped</p>';
 }
-
-// ─────────────────────────────────────────────────────────────
-// STOCK MODAL — with 8-Factor Future Performance
-// ─────────────────────────────────────────────────────────────
 let _ch=null;
 async function openStock(ticker){
   $('moverlay').classList.add('open');
@@ -1813,11 +1586,7 @@ async function openStock(ticker){
   const factors=fo.factors||[];
   const horizon=fo.horizon||{};
   const c=pc(q.change_pct);
-
-  // Signals
   const sigH=(a.signals||[]).map(s=>`<span class="sigchip">${s}</span>`).join('');
-
-  // Composite gauge
   const score=fo.composite_score||50;
   const rad=46,circ=2*Math.PI*rad,dash=circ*score/100;
   const gc=score>=78?'var(--g)':score>=63?'#50fa7b':score>=48?'var(--gold)':score>=33?'var(--or)':'var(--r)';
@@ -1826,10 +1595,8 @@ async function openStock(ticker){
     <circle cx="55" cy="55" r="${rad}" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="10"/>
     <circle cx="55" cy="55" r="${rad}" fill="none" stroke="${gc}" stroke-width="10" stroke-dasharray="${dash} ${circ-dash}" stroke-linecap="round"/>
     </svg><div class="gauge-v"><div class="gauge-n" style="color:${gc}">${score}</div><div class="gauge-l">/ 100</div></div></div>`;
-
-  // 8-Factor mini cards
-  const fpCardsH = factors.map(fac=>{
-    const col = fac.score>=75?'var(--g)':fac.score>=55?'var(--c)':fac.score>=35?'var(--gold)':'var(--r)';
+  const fpCardsH=factors.map(fac=>{
+    const col=fac.score>=75?'var(--g)':fac.score>=55?'var(--c)':fac.score>=35?'var(--gold)':'var(--r)';
     return `<div class="fp-card">
       <div class="fp-icon">${fac.icon}</div>
       <div class="fp-name">${fac.name}</div>
@@ -1838,18 +1605,14 @@ async function openStock(ticker){
       <div class="fp-bar"><div class="fp-bar-fill" style="width:${fac.score}%;background:${col}"></div></div>
     </div>`;
   }).join('');
-
-  // Horizon pills
   const hzCol=v=>v==='Bullish'?'var(--g)':v==='Bearish'?'var(--r)':'var(--gold)';
   const horizonH=`<div class="horizon-row">
     <div class="hz"><div class="hz-lbl">Short Term</div><div class="hz-val" style="color:${hzCol(horizon.short_term)}">${horizon.short_term||'—'}</div></div>
     <div class="hz"><div class="hz-lbl">Medium Term</div><div class="hz-val" style="color:${hzCol(horizon.medium_term)}">${horizon.medium_term||'—'}</div></div>
     <div class="hz"><div class="hz-lbl">Long Term</div><div class="hz-val" style="color:${hzCol(horizon.long_term)}">${horizon.long_term||'—'}</div></div>
   </div>`;
-
-  // 52W position bar
-  const w52pos = ol.week52_position_pct;
-  const w52bar = w52pos!=null ? `<div style="margin:.5rem 0">
+  const w52pos=ol.week52_position_pct;
+  const w52bar=w52pos!=null?`<div style="margin:.5rem 0">
     <div style="display:flex;justify-content:space-between;font-size:.58rem;color:var(--t2);margin-bottom:2px">
       <span>52W Low: ${f(ol.week52_low)}</span><span>52W High: ${f(ol.week52_high)}</span>
     </div>
@@ -1857,21 +1620,16 @@ async function openStock(ticker){
       <div style="width:${w52pos}%;height:100%;background:linear-gradient(90deg,var(--r),var(--gold),var(--g));border-radius:4px"></div>
     </div>
     <div style="font-size:.6rem;color:var(--t2);margin-top:2px;text-align:center">At ${w52pos}% of 52-week range</div>
-  </div>` : '';
-
-  // Price scenarios
-  const curr=q.price||1,mx=Math.max(sc2.bull||curr*1.2,sc2.base||curr*1.1,sc2.bear||curr*0.9);
+  </div>`:'';
+  const curr=q.price||1,mx2=Math.max(sc2.bull||curr*1.2,sc2.base||curr*1.1,sc2.bear||curr*0.9);
   const scH=sc2.bull?`
-    <div class="sc-row"><div class="sc-lbl" style="color:var(--g)">Bull</div><div class="sc-bar"><div class="sc-fill" style="width:${sc2.bull/mx*100}%;background:rgba(0,255,136,.6)"><span class="sc-price">${f(sc2.bull)} <span style="font-size:.55rem">${sc2.label_bull||''}</span></span></div></div></div>
-    <div class="sc-row"><div class="sc-lbl" style="color:var(--c)">Base</div><div class="sc-bar"><div class="sc-fill" style="width:${sc2.base/mx*100}%;background:rgba(0,229,255,.6)"><span class="sc-price">${f(sc2.base)} <span style="font-size:.55rem">${sc2.label_base||''}</span></span></div></div></div>
-    <div class="sc-row"><div class="sc-lbl" style="color:var(--r)">Bear</div><div class="sc-bar"><div class="sc-fill" style="width:${sc2.bear/mx*100}%;background:rgba(255,34,68,.6)"><span class="sc-price">${f(sc2.bear)} <span style="font-size:.55rem">-15%</span></span></div></div></div>`
+    <div class="sc-row"><div class="sc-lbl" style="color:var(--g)">Bull</div><div class="sc-bar"><div class="sc-fill" style="width:${sc2.bull/mx2*100}%;background:rgba(0,255,136,.6)"><span class="sc-price">${f(sc2.bull)} <span style="font-size:.55rem">${sc2.label_bull||''}</span></span></div></div></div>
+    <div class="sc-row"><div class="sc-lbl" style="color:var(--c)">Base</div><div class="sc-bar"><div class="sc-fill" style="width:${sc2.base/mx2*100}%;background:rgba(0,229,255,.6)"><span class="sc-price">${f(sc2.base)} <span style="font-size:.55rem">${sc2.label_base||''}</span></span></div></div></div>
+    <div class="sc-row"><div class="sc-lbl" style="color:var(--r)">Bear</div><div class="sc-bar"><div class="sc-fill" style="width:${sc2.bear/mx2*100}%;background:rgba(255,34,68,.6)"><span class="sc-price">${f(sc2.bear)} -15%</span></div></div></div>`
     :'<p style="color:var(--t2);font-size:.74rem">Insufficient data</p>';
-
   $('mcont').innerHTML=`
     <div class="mtitle">${q.name||ticker}</div>
     <div class="msub">${ticker} · ${fu.sector||'—'} · ${fu.industry||'—'}</div>
-
-    <!-- Live price + score + analyst -->
     <div class="g3" style="margin-bottom:.9rem">
       <div class="card">
         <div class="ctitle">⚡ Live Price</div>
@@ -1885,7 +1643,7 @@ async function openStock(ticker){
       </div>
       <div class="card"><div class="ctitle">🔮 Future Score (8-Factor)</div>
         <div class="gauge-w">${gsvg}<div class="gpill" style="background:${gcss}15;color:${gcss};border:1px solid ${gcss}30;font-size:.8rem;padding:3px 14px">${fo.grade||'N/A'}</div></div>
-        <div style="font-size:.62rem;color:var(--t2);text-align:center;margin-top:.3rem">Weighted composite of 8 fundamental &amp; technical factors</div>
+        <div style="font-size:.62rem;color:var(--t2);text-align:center;margin-top:.3rem">Weighted composite of 8 factors</div>
       </div>
       <div class="card"><div class="ctitle">📊 Analyst View</div>
         <div class="sr"><span class="sl">Recommendation</span><span class="sv" style="color:${gcss};font-weight:700">${ol.recommendation||'—'}</span></div>
@@ -1896,29 +1654,19 @@ async function openStock(ticker){
         <div class="sr"><span class="sl">MACD Signal</span><span class="sv" style="color:${ol.macd_signal==='Bullish'?'var(--g)':'var(--r)'}">${ol.macd_signal||'—'}</span></div>
       </div>
     </div>
-
-    <!-- 8-Factor cards -->
     <div class="card" style="margin-bottom:.9rem">
       <div class="ctitle">🎯 8-Factor Future Performance Score</div>
       <div class="fp-grid">${fpCardsH}</div>
     </div>
-
-    <!-- Time Horizon -->
     <div class="card" style="margin-bottom:.9rem">
       <div class="ctitle">⏱️ Multi-Horizon Outlook</div>
       ${horizonH}
     </div>
-
-    <!-- Chart -->
     <div class="card" style="margin-bottom:.9rem">
       <div class="ctitle">Price Chart — 3 Months</div>
       <div class="chwrap"><canvas id="dch"></canvas></div>
     </div>
-
-    <!-- Signals -->
     <div class="sigwrap" style="margin-bottom:.9rem">${sigH}</div>
-
-    <!-- Growth + Valuation + Health -->
     <div class="g3" style="margin-bottom:.9rem">
       <div class="card"><div class="ctitle">📈 Growth Metrics</div>
         <div class="sr"><span class="sl">Earnings Growth</span><span class="sv ${pc(ol.earnings_growth_pct)}">${ol.earnings_growth_pct!=null?fp(ol.earnings_growth_pct):'—'}</span></div>
@@ -1945,13 +1693,11 @@ async function openStock(ticker){
         <div class="sr"><span class="sl">Dividend Yield</span><span class="sv">${ol.dividend_yield_pct!=null?f(ol.dividend_yield_pct,2)+'%':'—'}</span></div>
       </div>
     </div>
-
-    <!-- Scenarios + Technicals -->
     <div class="g2" style="margin-bottom:.9rem">
       <div class="card"><div class="ctitle">🎯 1-Year Price Scenarios</div>
         <div style="font-size:.65rem;color:var(--t2);margin-bottom:.5rem">Current: <strong style="color:var(--t)">${f(curr)} ${q.currency||''}</strong></div>
         ${scH}
-        <div style="margin-top:.8rem;font-size:.62rem;color:var(--t3)">Based on analyst targets + growth trajectory + momentum</div>
+        <div style="margin-top:.8rem;font-size:.62rem;color:var(--t3)">Based on analyst targets + growth + momentum</div>
       </div>
       <div class="card"><div class="ctitle">📈 Technical Indicators</div>
         ${[['RSI',`${f(a.rsi,1)} ${(a.rsi||50)>70?'🔴 OB':(a.rsi||50)<30?'🟢 OS':'Neutral'}`],
@@ -1966,8 +1712,6 @@ async function openStock(ticker){
           ].map(([l,v])=>`<div class="sr"><span class="sl">${l}</span><span class="sv">${v}</span></div>`).join('')}
       </div>
     </div>
-
-    <!-- Ownership + About -->
     <div class="g2">
       <div class="card"><div class="ctitle">🏛️ Ownership &amp; Fundamentals</div>
         <div class="sr"><span class="sl">Insiders Hold</span><span class="sv">${ol.insider_pct!=null?f(ol.insider_pct,1)+'%':'—'}</span></div>
@@ -1978,13 +1722,11 @@ async function openStock(ticker){
         <div class="sr"><span class="sl">ROA</span><span class="sv">${fu.roa?(fu.roa*100).toFixed(1)+'%':'—'}</span></div>
       </div>
       ${fu.summary?`<div class="card"><div class="ctitle">About</div><p style="font-size:.78rem;line-height:1.75;color:var(--t2)">${fu.summary}</p></div>`
-        :'<div class="card"><div class="ctitle">About</div><p style="color:var(--t2);font-size:.76rem">No description</p></div>'}
+        :'<div class="card"><div class="ctitle">About</div><p style="color:var(--t2);font-size:.76rem">No description available</p></div>'}
     </div>
     <div style="font-size:.62rem;color:var(--t3);text-align:center;padding:.8rem 0">
       ⚠️ Educational purpose only. Not investment advice. Consult a SEBI-registered advisor before investing.
     </div>`;
-
-  // Render chart
   if(h.length>1){
     if(_ch){_ch.destroy();_ch=null;}
     setTimeout(()=>{
@@ -2004,13 +1746,8 @@ async function openStock(ticker){
     },80);
   }
 }
-
 function closeMod(){$('moverlay').classList.remove('open');document.body.style.overflow='';if(_ch){_ch.destroy();_ch=null;}}
 $('moverlay').addEventListener('click',e=>{if(e.target===$('moverlay'))closeMod();});
-
-// ─────────────────────────────────────────────────────────────
-// AI CHAT
-// ─────────────────────────────────────────────────────────────
 function qp(t){$('chin').value=t;chat();}
 async function chat(){
   const inp=$('chin'),q=inp.value.trim();if(!q)return;
@@ -2028,10 +1765,6 @@ async function chat(){
   }catch(e){a.innerHTML=`<span style="color:var(--r)">Error: ${e.message}</span>`;}
   btn.disabled=false;box.scrollTop=box.scrollHeight;inp.focus();
 }
-
-// ─────────────────────────────────────────────────────────────
-// INIT
-// ─────────────────────────────────────────────────────────────
 loadOverview();
 _loaded['overview']=true;
 </script>
@@ -2044,31 +1777,19 @@ def index():
         return (
             "<html><body style='font-family:monospace;background:#020509;color:#c8dff0;padding:2rem'>"
             "<h2 style='color:#ff2244'>⚠️ Missing packages</h2>"
-            "<p style='margin:.5rem 0'>Run this command:</p>"
-            "<pre style='background:#060c14;padding:1rem;border-radius:8px;color:#00ff88;margin:.5rem 0'>"
-            "pip install flask yfinance pandas numpy requests beautifulsoup4 anthropic lxml</pre>"
+            "<p>Run: <code>pip install flask yfinance pandas numpy requests beautifulsoup4 anthropic lxml</code></p>"
             f"<p style='color:#ff2244'>Error: {MISSING}</p>"
             "</body></html>"
         )
     return _HTML
 
+# Vercel requires the app object to be importable at module level
+# No __main__ guard needed for Vercel, but kept for local dev
 if __name__ == "__main__":
     print("""
- ╔════════════════════════════════════════════════════════════╗
- ║   FinVision v5.0 — AUTO-REFRESH + 8-FACTOR FUTURE ENGINE  ║
- ╠════════════════════════════════════════════════════════════╣
- ║  ✓ LIVE PULSE: Prices auto-refresh every 5 seconds        ║
- ║  ✓ Flash animation on price change (green=up, red=down)   ║
- ║  ✓ 8-Factor Future Score: Analyst + Growth + Valuation    ║
- ║    + Health + Momentum + Ownership + 52W Pos + Short      ║
- ║  ✓ Multi-horizon: Short / Medium / Long-term outlook      ║
- ║  ✓ Price scenarios: Bull / Base / Bear (1-year)           ║
- ║  ✓ Stochastic, ATR, OBV + all indicators                  ║
- ║  ✓ Server-side cache (60s TTL, background refresh)        ║
- ║  ✓ Fully responsive (mobile/tablet/desktop)               ║
- ╠════════════════════════════════════════════════════════════╣
- ║  Open browser:  http://localhost:5000                     ║
- ║  Optional:  export ANTHROPIC_API_KEY=your_key             ║
- ╚════════════════════════════════════════════════════════════╝
+ ╔══════════════════════════════════════════╗
+ ║   FinVision v5.1 — Vercel Ready         ║
+ ║   Open: http://localhost:5000           ║
+ ╚══════════════════════════════════════════╝
 """)
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
