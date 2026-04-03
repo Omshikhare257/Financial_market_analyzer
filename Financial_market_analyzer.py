@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-FinVision v5.1 — Vercel-ready build
-- Renamed to app.py for Vercel Flask detection
-- Background threads removed (serverless-safe)
-- All features intact: Live Pulse, 8-Factor AI Score, Multi-language Chat
+FinVision v6.0 — Enhanced Edition
+- Global Market Impact on India — Analysis Summary
+- Gemini API Key input in UI (user pastes key, stored in session)
+- More News Sources: Yahoo Finance, ET, Moneycontrol, LiveMint, Reuters, CNBC
+- News auto-rotates every 60 seconds with fresh top headlines
+- 8-Factor AI Score, Multi-language Chat (Anthropic + Gemini)
 """
 
 import os, re, json, threading, time, traceback
@@ -11,7 +13,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
-    from flask import Flask, jsonify, request, Response
+    from flask import Flask, jsonify, request, Response, session
     import yfinance as yf
     import pandas as pd
     import numpy as np
@@ -33,11 +35,8 @@ except ImportError:
     AI_AVAILABLE = False
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "finvision_v5_2025")
+app.secret_key = os.environ.get("SECRET_KEY", "finvision_v6_2025")
 
-# ─────────────────────────────────────────────────────────────
-# SERVER-SIDE CACHE (in-memory, works on serverless per-instance)
-# ─────────────────────────────────────────────────────────────
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
 _CACHE_TTL = 60
@@ -68,9 +67,6 @@ def live_price_set(ticker, data):
     with _LIVE_LOCK:
         _LIVE_PRICES[ticker] = {'data': data, 'ts': time.time()}
 
-# ─────────────────────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────────────────────
 GLOBAL_INDICES = {
     "S&P 500":"^GSPC","NASDAQ":"^IXIC","Dow Jones":"^DJI",
     "FTSE 100":"^FTSE","DAX":"^GDAXI","Nikkei 225":"^N225",
@@ -122,16 +118,12 @@ FOREX_PAIRS = {
     "USD/JPY":"USDJPY=X","EUR/INR":"EURINR=X","GBP/INR":"GBPINR=X",
     "AUD/USD":"AUDUSD=X","USD/CHF":"USDCHF=X","USD/CNY":"USDCNY=X",
 }
-
 ALL_LIVE_TICKERS = {}
 ALL_LIVE_TICKERS.update(INDIAN_INDICES)
 ALL_LIVE_TICKERS.update(GLOBAL_INDICES)
 ALL_LIVE_TICKERS.update({k: v for k, v in BONDS_AND_COMMODITIES.items() if k in ["Gold","Bitcoin","Crude Oil (WTI)","Ethereum"]})
 ALL_LIVE_TICKERS.update({"USD/INR": "USDINR=X"})
 
-# ─────────────────────────────────────────────────────────────
-# FAST QUOTE FETCH
-# ─────────────────────────────────────────────────────────────
 def safe_float(val, decimals=2):
     try:
         v = float(val)
@@ -208,9 +200,6 @@ def fetch_many(ticker_map, timeout=12):
             result[name] = {"error": "timeout"}
     return result
 
-# ─────────────────────────────────────────────────────────────
-# DATA HELPERS
-# ─────────────────────────────────────────────────────────────
 def get_india_indices():
     d = cache_get("india_indices")
     if d: return d
@@ -396,9 +385,6 @@ def _technical_analysis(ticker):
     except Exception as e:
         return {"error": str(e)[:60]}
 
-# ─────────────────────────────────────────────────────────────
-# FUTURE PERFORMANCE ENGINE — 8-Factor AI Score
-# ─────────────────────────────────────────────────────────────
 def _future_performance(ticker):
     try:
         info = yf.Ticker(ticker).info or {}
@@ -507,11 +493,9 @@ def _future_performance(ticker):
         details["short_ratio"] = safe_float(sr, 2)
         details["dividend_yield_pct"] = safe_float((info.get("dividendYield") or 0) * 100, 2)
         details["payout_ratio_pct"] = safe_float((info.get("payoutRatio") or 0) * 100, 1)
-        weights = {
-            "analyst": 0.28, "growth": 0.20, "valuation": 0.15,
-            "health": 0.12, "technical": 0.10, "ownership": 0.08,
-            "position": 0.04, "short": 0.03
-        }
+        weights = {"analyst": 0.28, "growth": 0.20, "valuation": 0.15,
+                   "health": 0.12, "technical": 0.10, "ownership": 0.08,
+                   "position": 0.04, "short": 0.03}
         comp = round(sum(sc[k] * weights[k] for k in weights), 1)
         if comp >= 78: grade, gc = "Strong Buy", "green"
         elif comp >= 63: grade, gc = "Buy", "lightgreen"
@@ -535,14 +519,9 @@ def _future_performance(ticker):
             "long_term": grade if comp >= 48 else "Underperform",
         }
         return {
-            "composite_score": comp,
-            "grade": grade,
-            "grade_color": gc,
-            "components": sc,
-            "weights": weights,
-            "details": details,
-            "scenarios": scenarios,
-            "horizon": horizon,
+            "composite_score": comp, "grade": grade, "grade_color": gc,
+            "components": sc, "weights": weights, "details": details,
+            "scenarios": scenarios, "horizon": horizon,
             "factors": [
                 {"name": "Analyst Consensus", "score": sc["analyst"], "weight": "28%", "icon": "📊"},
                 {"name": "Growth Trajectory", "score": sc["growth"], "weight": "20%", "icon": "📈"},
@@ -571,11 +550,8 @@ def _sector_performance():
             wk = safe_float((c.iloc[-1] - c.iloc[-min(6, len(c))]) / c.iloc[-min(6, len(c))] * 100, 2)
             mo = safe_float((c.iloc[-1] - c.iloc[-min(22, len(c))]) / c.iloc[-min(22, len(c))] * 100, 2)
             qt = safe_float((c.iloc[-1] - c.iloc[0]) / c.iloc[0] * 100, 2)
-            result[name] = {
-                "week": wk, "month": mo, "quarter": qt,
-                "price": safe_float(c.iloc[-1]),
-                "region": "India" if ".NS" in ticker or "^CNX" in ticker else "Global",
-            }
+            result[name] = {"week": wk, "month": mo, "quarter": qt, "price": safe_float(c.iloc[-1]),
+                            "region": "India" if ".NS" in ticker or "^CNX" in ticker else "Global"}
         except: pass
     with ThreadPoolExecutor(max_workers=15) as ex:
         futures = [ex.submit(worker, item) for item in all_s.items()]
@@ -627,32 +603,258 @@ def _india_market_trend():
         "nifty": idx.get("NIFTY 50", {}), "sensex": idx.get("SENSEX", {}),
     }
 
+# ─────────────────────────────────────────────────────────────
+# GLOBAL → INDIA IMPACT ANALYSIS
+# ─────────────────────────────────────────────────────────────
+def _global_india_impact():
+    cached = cache_get("global_india_impact", ttl=120)
+    if cached: return cached
+    try:
+        global_idx = get_global_indices()
+        india_idx = get_india_indices()
+        bonds = get_bonds()
+        forex = get_forex()
+        nifty = india_idx.get("NIFTY 50", {})
+        sensex = india_idx.get("SENSEX", {})
+        sp500 = global_idx.get("S&P 500", {})
+        nasdaq = global_idx.get("NASDAQ", {})
+        nikkei = global_idx.get("Nikkei 225", {})
+        hangseng = global_idx.get("Hang Seng", {})
+        shanghai = global_idx.get("Shanghai", {})
+        dax = global_idx.get("DAX", {})
+        gold = bonds.get("Gold", {})
+        crude = bonds.get("Crude Oil (WTI)", {})
+        usdinr = forex.get("USD/INR", {})
+        us_10y = bonds.get("US 10Y Treasury", {})
+        impacts = []
+        overall_impact_score = 0
+        impact_count = 0
+
+        # S&P 500 impact
+        sp_chg = sp500.get("change_pct", 0) or 0
+        if abs(sp_chg) > 0.3:
+            direction = "positive" if sp_chg > 0 else "negative"
+            mag = "strong" if abs(sp_chg) > 1.5 else "moderate" if abs(sp_chg) > 0.7 else "mild"
+            exp_nifty = sp_chg * 0.55
+            impacts.append({
+                "source": "S&P 500 (USA)",
+                "change": sp_chg,
+                "direction": direction,
+                "magnitude": mag,
+                "sector_impact": "IT, Tech stocks most affected (TCS, Infosys, Wipro, HCL)",
+                "expected_nifty_move": round(exp_nifty, 2),
+                "reason": f"US markets {'rising' if sp_chg>0 else 'falling'} by {abs(sp_chg):.1f}% → Indian IT exports & FII flows {'improve' if sp_chg>0 else 'pressure'} → NIFTY likely {'+' if sp_chg>0 else ''}{exp_nifty:.1f}%",
+                "icon": "🇺🇸",
+                "confidence": "High"
+            })
+            overall_impact_score += exp_nifty
+            impact_count += 1
+
+        # NASDAQ impact
+        nq_chg = nasdaq.get("change_pct", 0) or 0
+        if abs(nq_chg) > 0.3:
+            exp = nq_chg * 0.45
+            impacts.append({
+                "source": "NASDAQ (Tech)",
+                "change": nq_chg,
+                "direction": "positive" if nq_chg > 0 else "negative",
+                "magnitude": "strong" if abs(nq_chg) > 2 else "moderate",
+                "sector_impact": "NIFTY IT index direct correlation — Infosys, Wipro, HCL Tech",
+                "expected_nifty_move": round(exp, 2),
+                "reason": f"NASDAQ {'up' if nq_chg>0 else 'down'} {abs(nq_chg):.1f}% → NIFTY IT likely {'+' if exp>0 else ''}{exp:.1f}% → IT heavyweights {'gain' if exp>0 else 'fall'}",
+                "icon": "💻",
+                "confidence": "High"
+            })
+
+        # Nikkei/Asia impact
+        nk_chg = nikkei.get("change_pct", 0) or 0
+        if abs(nk_chg) > 0.4:
+            exp = nk_chg * 0.35
+            impacts.append({
+                "source": "Nikkei 225 (Japan)",
+                "change": nk_chg,
+                "direction": "positive" if nk_chg > 0 else "negative",
+                "magnitude": "moderate" if abs(nk_chg) > 1 else "mild",
+                "sector_impact": "Auto sector — Maruti, Tata Motors (Japan supply chain)",
+                "expected_nifty_move": round(exp, 2),
+                "reason": f"Asia sentiment {'positive' if nk_chg>0 else 'negative'} — Japanese yen & supply chain {'support' if nk_chg>0 else 'pressure'} Indian auto sector",
+                "icon": "🇯🇵",
+                "confidence": "Moderate"
+            })
+
+        # Hang Seng / China impact
+        hs_chg = hangseng.get("change_pct", 0) or 0
+        sh_chg = shanghai.get("change_pct", 0) or 0
+        china_avg = ((hs_chg or 0) + (sh_chg or 0)) / 2
+        if abs(china_avg) > 0.4:
+            exp = china_avg * 0.25
+            impacts.append({
+                "source": "China Markets (HK + Shanghai)",
+                "change": round(china_avg, 2),
+                "direction": "positive" if china_avg > 0 else "negative",
+                "magnitude": "moderate" if abs(china_avg) > 1 else "mild",
+                "sector_impact": "Metals (Tata Steel, JSW) — China demand drives commodity prices",
+                "expected_nifty_move": round(exp, 2),
+                "reason": f"China {'growing' if china_avg>0 else 'slowing'} → commodity demand {'up' if china_avg>0 else 'down'} → Indian metal stocks {'benefit' if china_avg>0 else 'suffer'}",
+                "icon": "🇨🇳",
+                "confidence": "Moderate"
+            })
+
+        # Crude Oil impact
+        crude_chg = crude.get("change_pct", 0) or 0
+        if abs(crude_chg) > 0.5:
+            # Rising crude = negative for India (import dependent)
+            exp = -crude_chg * 0.3
+            impacts.append({
+                "source": "Crude Oil (WTI)",
+                "change": crude_chg,
+                "direction": "negative" if crude_chg > 0 else "positive",
+                "magnitude": "high" if abs(crude_chg) > 2 else "moderate",
+                "sector_impact": "Oil & Gas (ONGC +), Aviation (IndiGo -), FMCG, Paint stocks affected",
+                "expected_nifty_move": round(exp, 2),
+                "reason": f"Crude {'rising' if crude_chg>0 else 'falling'} {abs(crude_chg):.1f}% → India imports 85% oil → {'inflation risk, CAD widens, INR weakens' if crude_chg>0 else 'inflation eases, CAD improves, INR strengthens'}",
+                "icon": "🛢️",
+                "confidence": "High"
+            })
+            overall_impact_score += exp
+            impact_count += 1
+
+        # Gold impact
+        gold_chg = gold.get("change_pct", 0) or 0
+        if abs(gold_chg) > 0.5:
+            impacts.append({
+                "source": "Gold Price",
+                "change": gold_chg,
+                "direction": "mixed" if gold_chg > 0 else "mild positive",
+                "magnitude": "mild",
+                "sector_impact": "Titan, Kalyan Jewellers, HDFC Gold Fund — Gold ETFs",
+                "expected_nifty_move": round(gold_chg * 0.08, 2),
+                "reason": f"Gold {'up' if gold_chg>0 else 'down'} {abs(gold_chg):.1f}% → Jewelry stocks {'benefit' if gold_chg>0 else 'pressure'} — India #1 gold consumer globally",
+                "icon": "🥇",
+                "confidence": "Moderate"
+            })
+
+        # USD/INR impact
+        usdinr_chg = usdinr.get("change_pct", 0) or 0
+        if abs(usdinr_chg) > 0.2:
+            # Rising USD/INR = INR weakening = negative
+            exp = -usdinr_chg * 0.4
+            impacts.append({
+                "source": "USD/INR (Rupee)",
+                "change": usdinr_chg,
+                "direction": "negative" if usdinr_chg > 0 else "positive",
+                "magnitude": "high" if abs(usdinr_chg) > 0.7 else "moderate",
+                "sector_impact": "IT exporters benefit (TCS, Infy) when INR weak; Importers suffer (Oil, Electronics)",
+                "expected_nifty_move": round(exp, 2),
+                "reason": f"INR {'weakening' if usdinr_chg>0 else 'strengthening'} vs USD → {'IT export earnings higher in INR, but FII outflows likely' if usdinr_chg>0 else 'FII inflows improve, import costs fall'}",
+                "icon": "💱",
+                "confidence": "High"
+            })
+            overall_impact_score += exp
+            impact_count += 1
+
+        # US 10Y Bond yield
+        us10y_chg = us_10y.get("change_pct", 0) or 0
+        us10y_price = us_10y.get("price", 4.0) or 4.0
+        if abs(us10y_chg) > 0.5 or us10y_price > 4.5:
+            exp = -us10y_chg * 0.35
+            impacts.append({
+                "source": "US 10Y Treasury Yield",
+                "change": us10y_chg,
+                "direction": "negative" if us10y_chg > 0 else "positive",
+                "magnitude": "high" if us10y_price > 5 else "moderate" if us10y_price > 4.5 else "mild",
+                "sector_impact": "Banking, Real Estate most sensitive — HDFC Bank, Bajaj Finance",
+                "expected_nifty_move": round(exp, 2),
+                "reason": f"US yields {'rising' if us10y_chg>0 else 'falling'} → {'FII sell India bonds & equity for safe US returns' if us10y_chg>0 else 'FII return to EM markets like India → bullish'}",
+                "icon": "🏛️",
+                "confidence": "High"
+            })
+            overall_impact_score += exp
+            impact_count += 1
+
+        # Overall summary
+        avg_impact = overall_impact_score / impact_count if impact_count > 0 else 0
+        overall = {
+            "net_expected_nifty_move": round(avg_impact, 2),
+            "overall_signal": "Bullish" if avg_impact > 0.3 else "Bearish" if avg_impact < -0.3 else "Neutral",
+            "nifty_current": nifty.get("price"),
+            "nifty_change": nifty.get("change_pct"),
+            "sensex_current": sensex.get("price"),
+            "key_risks": [],
+            "key_tailwinds": [],
+        }
+        for imp in impacts:
+            if imp["direction"] in ["negative"]:
+                overall["key_risks"].append(f"{imp['icon']} {imp['source']}: {imp['reason'][:80]}")
+            elif imp["direction"] in ["positive"]:
+                overall["key_tailwinds"].append(f"{imp['icon']} {imp['source']}: {imp['reason'][:80]}")
+        result = {"impacts": impacts, "overall": overall, "ts": time.time()}
+        cache_set("global_india_impact", result)
+        return result
+    except Exception as e:
+        return {"impacts": [], "overall": {"net_expected_nifty_move": 0, "overall_signal": "Neutral"}, "error": str(e)}
+
+# ─────────────────────────────────────────────────────────────
+# ENHANCED NEWS SCRAPER — Multiple Sources
+# ─────────────────────────────────────────────────────────────
 def _scrape_news():
-    cached = cache_get("news")
+    # Use short TTL so news rotates on frontend requests
+    cached = cache_get("news", ttl=55)
     if cached: return cached
     news = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    for url, source in [
-        ("https://finance.yahoo.com/news/", "Yahoo Finance"),
-        ("https://economictimes.indiatimes.com/markets", "Economic Times"),
-    ]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    sources = [
+        ("https://finance.yahoo.com/news/", "Yahoo Finance", "h3"),
+        ("https://economictimes.indiatimes.com/markets", "Economic Times", "h3"),
+        ("https://www.moneycontrol.com/news/business/markets/", "Moneycontrol", "h2"),
+        ("https://www.livemint.com/market/stock-market-news", "LiveMint", "h2"),
+        ("https://www.reuters.com/finance/markets/", "Reuters", "h3"),
+        ("https://www.cnbctv18.com/market/", "CNBC TV18", "h3"),
+    ]
+    now_str = datetime.now().strftime("%H:%M")
+    for url, source, tag in sources:
         try:
-            r = req_lib.get(url, headers=headers, timeout=6)
+            r = req_lib.get(url, headers=headers, timeout=7)
             soup = BeautifulSoup(r.text, "html.parser")
-            for tag in soup.find_all(["h2", "h3"], limit=10):
-                text = tag.get_text(strip=True)
-                if len(text) < 25: continue
-                a_tag = tag.find("a") or (tag.parent and tag.parent.find("a"))
+            count = 0
+            for elem in soup.find_all(tag, limit=15):
+                text = elem.get_text(strip=True)
+                if len(text) < 25 or len(text) > 300: continue
+                # Filter only market/finance related headlines
+                kw = ["stock","market","nifty","sensex","share","invest","rupee","rbi","sebi",
+                      "ipo","fund","trade","economy","gdp","rate","oil","gold","bitcoin","crypto",
+                      "bank","finance","profit","revenue","quarter","earning","index","rally","bull","bear",
+                      "nasdaq","sp500","dow","fed","inflation","fiscal","budget","export","import"]
+                if not any(k in text.lower() for k in kw): continue
+                a_tag = elem.find("a") or (elem.parent and elem.parent.find("a"))
                 href = "#"
                 if a_tag and a_tag.get("href"):
                     href = a_tag["href"]
                     if href.startswith("/"):
                         base = url.split("/")[0] + "//" + url.split("/")[2]
                         href = base + href
-                news.append({"title": text, "source": source, "url": href, "time": datetime.now().strftime("%H:%M")})
-        except: pass
-    cache_set("news", news[:20])
-    return news[:20]
+                news.append({"title": text, "source": source, "url": href, "time": now_str})
+                count += 1
+                if count >= 8: break
+        except Exception as e:
+            pass
+    # Remove duplicates by title similarity
+    seen_titles = set()
+    unique_news = []
+    for item in news:
+        key = item["title"][:50].lower().strip()
+        if key not in seen_titles:
+            seen_titles.add(key)
+            unique_news.append(item)
+    # Shuffle for variety on rotation
+    import random
+    random.shuffle(unique_news)
+    final = unique_news[:40]
+    cache_set("news", final)
+    return final
 
 def _search_stock(query):
     q = query.strip().upper()
@@ -681,7 +883,10 @@ def _search_stock(query):
         results.append({"name": q, "ticker": q})
     return results[:8]
 
-def _ai_chat(question):
+# ─────────────────────────────────────────────────────────────
+# AI CHAT — Anthropic + Gemini
+# ─────────────────────────────────────────────────────────────
+def _ai_chat(question, gemini_key=None):
     q_up = question.upper()
     ticker_found = None
     all_stocks = {**POPULAR_INDIAN_STOCKS, **POPULAR_GLOBAL_STOCKS}
@@ -721,19 +926,10 @@ Sector: {f_data.get('sector')} | Industry: {f_data.get('industry')}
 EPS: {f_data.get('eps')} | ROE: {f_data.get('roe')} | D/E: {f_data.get('debt_equity')}
 RSI: {ta.get('rsi')} | MACD: {'Bullish' if (ta.get('macd') or 0) > (ta.get('signal') or 0) else 'Bearish'} | Momentum: {ta.get('momentum_score')}/100
 MA20/50/200: {ta.get('ma20')}/{ta.get('ma50')}/{ta.get('ma200')}
-Support: {ta.get('support')} | Resistance: {ta.get('resistance')}
-Signals: {', '.join(ta.get('signals', []))}
 === 8-FACTOR FUTURE SCORE ===
-AI Composite Score: {fo.get('composite_score')}/100 → {fo.get('grade')}
-Short-term Outlook: {fo.get('horizon', {}).get('short_term')}
-Medium-term Outlook: {fo.get('horizon', {}).get('medium_term')}
-Long-term Outlook: {fo.get('horizon', {}).get('long_term')}
+AI Score: {fo.get('composite_score')}/100 → {fo.get('grade')}
+Horizons: ST={fo.get('horizon',{}).get('short_term')} MT={fo.get('horizon',{}).get('medium_term')} LT={fo.get('horizon',{}).get('long_term')}
 Analyst Target: {ol.get('analyst_target')} (Upside: {ol.get('analyst_upside_pct')}%)
-Earnings Growth: {ol.get('earnings_growth_pct')}% | Revenue Growth: {ol.get('revenue_growth_pct')}%
-PEG Ratio: {ol.get('peg_ratio')} | PE Expansion: {ol.get('pe_expansion')}
-Financial Health: D/E={ol.get('debt_to_equity')} CR={ol.get('current_ratio')} FCF={ol.get('free_cashflow_b')}Bn
-Institutional Holdings: {ol.get('institution_pct')}% | Insiders: {ol.get('insider_pct')}%
-Short Ratio: {ol.get('short_ratio')} | 52W Position: {ol.get('week52_position_pct')}%
 Scenarios (1Y): Bull={sc.get('bull')} Base={sc.get('base')} Bear={sc.get('bear')}
 About: {f_data.get('summary', '')[:300]}
 """
@@ -744,34 +940,54 @@ About: {f_data.get('summary', '')[:300]}
             wt = _world_market_trend()
             extra += f"\n=== GLOBAL MARKET ===\nSentiment: {wt['sentiment']} | Avg: {wt['avg_change']}%\nVIX: {wt['vix']} | Fear: {wt['fear_gauge']}\n"
         except: pass
-    if any(w in q_low for w in ["india","nifty","sensex","भारत","indian market"]):
+    if any(w in q_low for w in ["india","nifty","sensex","भारत","indian market","impact"]):
         try:
             it = _india_market_trend()
-            extra += f"\n=== INDIA MARKET ===\nSentiment: {it['sentiment']} | Avg: {it['avg_change']}%\nNIFTY: {it['nifty'].get('price')} ({it['nifty'].get('change_pct')}%)\nSENSEX: {it['sensex'].get('price')} ({it['sensex'].get('change_pct')}%)\n"
+            imp = _global_india_impact()
+            extra += f"\n=== INDIA MARKET ===\nSentiment: {it['sentiment']} | Avg: {it['avg_change']}%\nNIFTY: {it['nifty'].get('price')} ({it['nifty'].get('change_pct')}%)\nGlobal Impact Signal: {imp['overall'].get('overall_signal')}\n"
         except: pass
     full_ctx = context + extra
+    system_prompt = (
+        "You are FinVision AI v6, expert financial analyst for Indian & global markets. "
+        "Live market data + 8-factor future performance scores provided. "
+        "CRITICAL: Reply in SAME language as user. Hindi→Hindi. English→English. Hinglish→Hinglish. "
+        "Give structured analysis. For stocks include: current status, 8-factor score breakdown, "
+        "short/medium/long-term outlook, key risks, buy/hold/sell recommendation with reasoning. "
+        "End with: ⚠️ Disclaimer: Educational only. SEBI-registered advisor se consult karein."
+    )
+    # Try Gemini first if key provided
+    if gemini_key:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+            payload = {
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": [{"parts": [{"text": f"{full_ctx}\n\nUser: {question}"}]}],
+                "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.7}
+            }
+            resp = req_lib.post(url, json=payload, timeout=20)
+            data = resp.json()
+            text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            if text:
+                return text
+        except Exception as e:
+            pass
+    # Try Anthropic
     if AI_AVAILABLE and _anthropic_lib:
         try:
             client = _anthropic_lib.Anthropic(api_key=_ANTHROPIC_KEY)
             msg = client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=1500,
-                system=(
-                    "You are FinVision AI, expert financial analyst for Indian & global markets. "
-                    "Live market data + 8-factor future performance scores provided. "
-                    "CRITICAL: Reply in SAME language as user. Hindi→Hindi. English→English. Hinglish→Hinglish. "
-                    "Give structured analysis. For stocks include: current status, 8-factor score breakdown, "
-                    "short/medium/long-term outlook, key risks, buy/hold/sell recommendation with reasoning. "
-                    "End with: ⚠️ Disclaimer: Educational only. SEBI-registered advisor se consult karein."
-                ),
+                system=system_prompt,
                 messages=[{"role": "user", "content": f"{full_ctx}\n\nUser: {question}"}],
             )
             return msg.content[0].text
         except: pass
+    # Fallback
     parts = [f"📊 **{question}**\n"]
     if full_ctx:
         parts.append(f"```\n{full_ctx[:800]}\n```\n")
-    parts.append("\n⚠️ *Educational only. Investment advice nahi hai.*")
+    parts.append("\n⚠️ *Educational only. No AI key configured — add Gemini key in Settings.*")
     return "".join(parts)
 
 # ─────────────────────────────────────────────────────────────
@@ -779,7 +995,7 @@ About: {f_data.get('summary', '')[:300]}
 # ─────────────────────────────────────────────────────────────
 @app.route("/api/health")
 def api_health():
-    return jsonify({"status": "ok", "ai": AI_AVAILABLE, "cached": list(_CACHE.keys()), "time": datetime.now().isoformat()})
+    return jsonify({"status": "ok", "ai": AI_AVAILABLE, "time": datetime.now().isoformat()})
 
 @app.route("/api/indices/global")
 def api_global():
@@ -821,6 +1037,10 @@ def api_sectors():
 def api_news():
     return jsonify(_scrape_news())
 
+@app.route("/api/global-india-impact")
+def api_global_india_impact():
+    return jsonify(_global_india_impact())
+
 @app.route("/api/stock/<ticker>")
 def api_stock(ticker):
     ticker = ticker.upper()
@@ -832,10 +1052,8 @@ def api_stock(ticker):
         fo2 = ex.submit(_future_performance, ticker)
         fh = ex.submit(_fetch_history, ticker, period)
     return jsonify({
-        "quote": fq.result(),
-        "fundamentals": ff.result(),
-        "analysis": ft.result(),
-        "future_outlook": fo2.result(),
+        "quote": fq.result(), "fundamentals": ff.result(),
+        "analysis": ft.result(), "future_outlook": fo2.result(),
         "history": fh.result(),
     })
 
@@ -861,34 +1079,23 @@ def api_live_pulse():
 def api_chat():
     data = request.get_json(force=True) or {}
     q = (data.get("question") or "").strip()
+    gemini_key = (data.get("gemini_key") or "").strip()
     if not q: return jsonify({"error": "question required"}), 400
-    return jsonify({"answer": _ai_chat(q), "timestamp": datetime.now().isoformat()})
+    return jsonify({"answer": _ai_chat(q, gemini_key=gemini_key or None), "timestamp": datetime.now().isoformat()})
 
 @app.route("/api/search/<path:query>")
 def api_search(query):
     return jsonify(_search_stock(query))
 
 # ─────────────────────────────────────────────────────────────
-# FRONTEND HTML
+# FRONTEND HTML — Complete v6.0
 # ─────────────────────────────────────────────────────────────
-def _skel_rows(n=4):
-    return ''.join(
-        '<div class="sr"><div class="skel sm"></div><div class="skel" style="width:40%"></div></div>'
-        for _ in range(n)
-    )
-
-def _skel_ic(n=6):
-    return ''.join(
-        '<div class="ic"><div class="skel sm"></div><div class="skel lg"></div><div class="skel sm"></div></div>'
-        for _ in range(n)
-    )
-
 _HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=5.0">
-<title>FinVision v5 — Live Market Analyzer</title>
+<title>FinVision v6 — Live Market Analyzer</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Exo+2:wght@300;400;600;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
@@ -897,7 +1104,7 @@ _HTML = r"""<!DOCTYPE html>
   --bg:#020509;--s1:#060c14;--s2:#091220;--s3:#0c172a;
   --border:#112236;--border2:#1a3354;
   --c:#00e5ff;--g:#00ff88;--r:#ff2244;--gold:#ffcc00;
-  --pu:#b060ff;--or:#ff7700;
+  --pu:#b060ff;--or:#ff7700;--amber:#ffb347;
   --t:#c8dff0;--t2:#4a7090;--t3:#1e3858;
   --glow:0 0 18px rgba(0,229,255,.1);
 }
@@ -939,6 +1146,10 @@ header{position:sticky;top:0;z-index:500;height:52px;display:flex;align-items:ce
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.1}}
 .hclk{font-family:'Share Tech Mono',monospace;font-size:.6rem;color:var(--t2);white-space:nowrap;display:none}
 @media(min-width:700px){.hclk{display:block}}
+.settbtn{background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--t2);
+  padding:3px 9px;border-radius:6px;cursor:pointer;font-size:.65rem;font-family:'Exo 2',sans-serif;
+  transition:all .15s;white-space:nowrap;flex-shrink:0}
+.settbtn:hover{background:rgba(255,204,0,.1);color:var(--gold);border-color:var(--gold)}
 @keyframes flash-up{0%{background:rgba(0,255,136,.3)}100%{background:transparent}}
 @keyframes flash-dn{0%{background:rgba(255,34,68,.3)}100%{background:transparent}}
 .flash-up{animation:flash-up .6s ease-out}
@@ -1075,30 +1286,64 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   background:rgba(0,229,255,.06);border:1px solid rgba(0,229,255,.13);color:var(--c)}
 .chwrap{position:relative;height:200px;background:var(--s2);border-radius:7px;padding:.5rem}
 @media(min-width:768px){.chwrap{height:260px}}
-.ni{padding:.6rem 0;border-bottom:1px solid rgba(255,255,255,.03);display:flex;gap:.6rem;align-items:flex-start}
-.ni:last-child{border:none}
-.ndot{width:4px;height:4px;border-radius:50%;background:var(--c);margin-top:7px;flex-shrink:0}
-.ntitle{font-size:.8rem;font-weight:500;line-height:1.5;color:var(--t)}
-.nmeta{font-size:.62rem;color:var(--t2);margin-top:1px}
-.nlink{color:var(--t);text-decoration:none}.nlink:hover{color:var(--c)}
-.moverlay{position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.92);backdrop-filter:blur(18px);
-  display:none;align-items:flex-start;justify-content:center;padding:.8rem;overflow-y:auto}
-.moverlay.open{display:flex}
-.modal{background:var(--s1);border:1px solid var(--border2);border-radius:14px;
-  width:100%;max-width:980px;padding:1rem;position:relative;margin:auto}
-@media(min-width:768px){.modal{padding:1.8rem}}
-.mclose{position:absolute;top:.8rem;right:.8rem;background:rgba(255,255,255,.06);
-  border:1px solid var(--border);color:var(--t);width:30px;height:30px;border-radius:50%;
-  cursor:pointer;font-size:.85rem;display:flex;align-items:center;justify-content:center;transition:background .2s}
-.mclose:hover{background:rgba(255,34,68,.2)}
-.mtitle{font-family:'Rajdhani',sans-serif;font-size:1.25rem;font-weight:700;margin-bottom:.12rem;padding-right:36px}
-@media(min-width:768px){.mtitle{font-size:1.5rem}}
-.msub{color:var(--t2);margin-bottom:1rem;font-size:.76rem}
+/* ── NEWS SECTION ── */
+.news-grid{display:grid;grid-template-columns:1fr;gap:.6rem}
+@media(min-width:640px){.news-grid{grid-template-columns:1fr 1fr}}
+@media(min-width:1000px){.news-grid{grid-template-columns:repeat(3,1fr)}}
+.news-card{background:var(--s2);border:1px solid var(--border);border-radius:9px;padding:.8rem;
+  transition:all .2s;position:relative;overflow:hidden}
+.news-card:hover{border-color:var(--border2);transform:translateY(-1px)}
+.news-card::before{content:'';position:absolute;top:0;left:0;width:3px;height:100%;background:var(--c)}
+.news-src-badge{display:inline-block;font-size:.5rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;
+  padding:1px 6px;border-radius:10px;background:rgba(0,229,255,.07);color:var(--c);border:1px solid rgba(0,229,255,.15);margin-bottom:.4rem}
+.news-title{font-size:.8rem;font-weight:500;line-height:1.55;color:var(--t);margin-bottom:.35rem}
+.news-title a{color:var(--t);text-decoration:none;transition:color .15s}
+.news-title a:hover{color:var(--c)}
+.news-meta{font-size:.6rem;color:var(--t3);display:flex;align-items:center;gap:.4rem}
+.news-dot{width:3px;height:3px;border-radius:50%;background:var(--t3)}
+.news-rotate-bar{height:2px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:.8rem}
+.news-rotate-fill{height:100%;background:linear-gradient(90deg,var(--c),var(--g));border-radius:2px;transition:width 1s linear}
+.news-cnt{font-size:.65rem;color:var(--t2);text-align:right;margin-bottom:.5rem;font-family:'Share Tech Mono',monospace}
+/* ── GLOBAL → INDIA IMPACT ── */
+.impact-header{background:linear-gradient(135deg,rgba(0,229,255,.06),rgba(0,255,136,.04));
+  border:1px solid rgba(0,229,255,.15);border-radius:12px;padding:1rem 1.2rem;margin-bottom:1rem}
+.impact-signal{font-family:'Rajdhani',sans-serif;font-size:2rem;font-weight:700;display:flex;align-items:center;gap:.6rem}
+.impact-card{background:var(--s2);border:1px solid var(--border);border-radius:10px;padding:.9rem;
+  margin-bottom:.6rem;transition:all .2s;position:relative;overflow:hidden}
+.impact-card:hover{border-color:var(--border2)}
+.impact-card.positive{border-left:3px solid var(--g)}
+.impact-card.negative{border-left:3px solid var(--r)}
+.impact-card.mixed{border-left:3px solid var(--gold)}
+.impact-src{font-size:.75rem;font-weight:700;color:var(--t);margin-bottom:.25rem;display:flex;align-items:center;gap:.4rem;flex-wrap:wrap}
+.impact-chg{font-family:'Share Tech Mono',monospace;font-size:.72rem}
+.impact-reason{font-size:.72rem;color:var(--t2);line-height:1.65;margin:.35rem 0}
+.impact-sector{font-size:.62rem;color:var(--c);background:rgba(0,229,255,.05);
+  border:1px solid rgba(0,229,255,.1);padding:2px 8px;border-radius:10px;display:inline-block;margin-top:.2rem}
+.impact-move{font-family:'Share Tech Mono',monospace;font-size:.8rem;font-weight:700;padding:2px 9px;border-radius:6px;white-space:nowrap}
+.impact-move.pos{background:rgba(0,255,136,.1);color:var(--g)}
+.impact-move.neg{background:rgba(255,34,68,.1);color:var(--r)}
+.impact-move.neu{background:rgba(255,204,0,.1);color:var(--gold)}
+.imp-mag{font-size:.52rem;font-weight:700;letter-spacing:1px;text-transform:uppercase;
+  padding:1px 6px;border-radius:8px;border:1px solid}
+.mag-high{color:var(--r);border-color:rgba(255,34,68,.3);background:rgba(255,34,68,.06)}
+.mag-strong{color:var(--r);border-color:rgba(255,34,68,.3);background:rgba(255,34,68,.06)}
+.mag-moderate{color:var(--gold);border-color:rgba(255,204,0,.3);background:rgba(255,204,0,.06)}
+.mag-mild{color:var(--g);border-color:rgba(0,255,136,.3);background:rgba(0,255,136,.06)}
+.risk-tail-grid{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-top:.8rem}
+.risk-box{background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:.75rem}
+.risk-box.risks{border-left:3px solid var(--r)}
+.risk-box.tails{border-left:3px solid var(--g)}
+.risk-item{font-size:.68rem;color:var(--t2);line-height:1.55;padding:.22rem 0;border-bottom:1px solid rgba(255,255,255,.03)}
+.risk-item:last-child{border:none}
+/* ── CHAT SECTION ── */
 .chatwrap{display:flex;flex-direction:column;height:calc(100svh - 185px);min-height:380px;max-height:780px;
   background:var(--s1);border:1px solid var(--border);border-radius:14px;overflow:hidden}
-.chhead{padding:.7rem 1rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.7rem;flex-shrink:0}
+.chhead{padding:.7rem 1rem;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:.7rem;flex-shrink:0;flex-wrap:wrap}
 .chavatar{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,var(--c),var(--g));
   display:flex;align-items:center;justify-content:center;font-size:.95rem;flex-shrink:0}
+.gemini-status{font-size:.58rem;padding:2px 7px;border-radius:10px;font-weight:700;letter-spacing:.5px}
+.gs-active{background:rgba(255,204,0,.1);color:var(--gold);border:1px solid rgba(255,204,0,.2)}
+.gs-inactive{background:rgba(255,255,255,.04);color:var(--t3);border:1px solid var(--border)}
 .chmsg{flex:1;overflow-y:auto;padding:.9rem;display:flex;flex-direction:column;gap:.7rem}
 .chmsg::-webkit-scrollbar{width:2px}
 .chmsg::-webkit-scrollbar-thumb{background:var(--border)}
@@ -1111,7 +1356,6 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   padding:2px 9px;border-radius:12px;cursor:pointer;font-size:.64rem;font-family:'Exo 2',sans-serif;
   transition:all .15s;white-space:nowrap}
 .qp:hover{background:rgba(0,229,255,.07);color:var(--c);border-color:rgba(0,229,255,.2)}
-.lhint{font-size:.6rem;color:var(--t3);padding:.25rem .9rem;text-align:center;flex-shrink:0}
 .chin-row{display:flex;gap:.5rem;padding:.7rem .9rem;border-top:1px solid var(--border);background:var(--s2);flex-shrink:0}
 .chin{flex:1;background:var(--s1);border:1px solid var(--border);color:var(--t);
   padding:.5rem .8rem;border-radius:8px;font-family:'Exo 2',sans-serif;font-size:.82rem;outline:none;transition:border .2s;min-width:0}
@@ -1120,22 +1364,94 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   padding:.5rem 1rem;border-radius:8px;cursor:pointer;font-family:'Rajdhani',sans-serif;font-weight:700;font-size:.8rem;
   flex-shrink:0;transition:opacity .2s;letter-spacing:.5px}
 .chsend:hover{opacity:.85}.chsend:disabled{opacity:.3;cursor:not-allowed}
+/* ── SETTINGS MODAL ── */
+.moverlay{position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.92);backdrop-filter:blur(18px);
+  display:none;align-items:flex-start;justify-content:center;padding:.8rem;overflow-y:auto}
+.moverlay.open{display:flex}
+.modal{background:var(--s1);border:1px solid var(--border2);border-radius:14px;
+  width:100%;max-width:980px;padding:1rem;position:relative;margin:auto}
+@media(min-width:768px){.modal{padding:1.8rem}}
+.mclose{position:absolute;top:.8rem;right:.8rem;background:rgba(255,255,255,.06);
+  border:1px solid var(--border);color:var(--t);width:30px;height:30px;border-radius:50%;
+  cursor:pointer;font-size:.85rem;display:flex;align-items:center;justify-content:center;transition:background .2s}
+.mclose:hover{background:rgba(255,34,68,.2)}
+.mtitle{font-family:'Rajdhani',sans-serif;font-size:1.25rem;font-weight:700;margin-bottom:.12rem;padding-right:36px}
+.msub{color:var(--t2);margin-bottom:1rem;font-size:.76rem}
+/* Settings modal */
+.sett-modal{max-width:560px}
+.sett-field{margin-bottom:1rem}
+.sett-label{font-size:.65rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--t2);margin-bottom:.35rem}
+.sett-input{width:100%;background:var(--s2);border:1px solid var(--border);color:var(--t);
+  padding:.55rem .8rem;border-radius:8px;font-family:'Share Tech Mono',monospace;font-size:.8rem;outline:none;transition:border .2s}
+.sett-input:focus{border-color:var(--gold)}
+.sett-hint{font-size:.62rem;color:var(--t3);margin-top:.25rem;line-height:1.5}
+.sett-save{background:linear-gradient(135deg,var(--gold),var(--or));border:none;color:#000;
+  padding:.55rem 1.5rem;border-radius:8px;cursor:pointer;font-family:'Rajdhani',sans-serif;font-weight:700;font-size:.85rem;
+  margin-top:.5rem;letter-spacing:.5px;transition:opacity .2s}
+.sett-save:hover{opacity:.85}
+.sett-ok{font-size:.75rem;color:var(--g);margin-top:.35rem;display:none}
 [data-live]{transition:color .3s}
 </style>
 </head>
 <body>
 <div class="gridbg"></div>
-<div class="refresh-ring" id="rring" title="Auto-refresh active" onclick="forceRefresh()">
+<div class="refresh-ring" id="rring" title="Auto-refresh" onclick="forceRefresh()">
   <svg class="rring-svg" viewBox="0 0 36 36">
     <circle class="rring-track" cx="18" cy="18" r="15"/>
     <circle class="rring-fill" id="rring-fill" cx="18" cy="18" r="15"/>
   </svg>
   <span class="rring-icon">⟳</span>
 </div>
+
+<!-- SETTINGS MODAL -->
+<div class="moverlay" id="sett-overlay">
+  <div class="modal sett-modal">
+    <button class="mclose" onclick="closeSettings()">✕</button>
+    <div class="mtitle">⚙️ Settings</div>
+    <div class="msub">Configure your AI API keys</div>
+    <div class="sett-field">
+      <div class="sett-label">🔑 Google Gemini API Key</div>
+      <input class="sett-input" id="gemini-key-inp" type="password" placeholder="Paste your Gemini API key here...">
+      <div class="sett-hint">
+        Get free key: <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--gold)">aistudio.google.com</a><br>
+        Used for AI chat analysis. Key is saved in your browser only — never sent to our server except during chat API calls.
+      </div>
+    </div>
+    <div class="sett-field">
+      <div class="sett-label">Gemini Model</div>
+      <select class="sett-input" id="gemini-model-sel">
+        <option value="gemini-1.5-flash">gemini-1.5-flash (Fast, Free tier)</option>
+        <option value="gemini-1.5-pro">gemini-1.5-pro (Better quality)</option>
+        <option value="gemini-2.0-flash">gemini-2.0-flash (Latest)</option>
+      </select>
+    </div>
+    <button class="sett-save" onclick="saveSettings()">💾 Save Settings</button>
+    <div class="sett-ok" id="sett-ok">✅ Settings saved!</div>
+    <div style="margin-top:1.2rem;padding:.8rem;background:rgba(255,204,0,.04);border:1px solid rgba(255,204,0,.12);border-radius:8px">
+      <div style="font-size:.65rem;color:var(--gold);font-weight:700;letter-spacing:1px;margin-bottom:.3rem">HOW TO GET GEMINI KEY (FREE)</div>
+      <div style="font-size:.68rem;color:var(--t2);line-height:1.7">
+        1. Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" style="color:var(--c)">aistudio.google.com</a><br>
+        2. Sign in with Google account<br>
+        3. Click "Create API Key"<br>
+        4. Copy and paste it above<br>
+        5. Free tier: 15 requests/min, 1500/day
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- STOCK ANALYSIS MODAL -->
+<div class="moverlay" id="moverlay">
+  <div class="modal">
+    <button class="mclose" onclick="closeMod()">✕</button>
+    <div id="mcont"><div class="ldc"><div class="spin"></div> Loading full analysis…</div></div>
+  </div>
+</div>
+
 <header>
-  <div class="logo">Fin<span style="-webkit-text-fill-color:var(--gold)">Vision</span><sub>v5</sub></div>
+  <div class="logo">Fin<span style="-webkit-text-fill-color:var(--gold)">Vision</span><sub>v6</sub></div>
   <div class="hsearch" id="hsw">
-    <input id="hsinp" placeholder="Search any stock worldwide (TCS, AAPL, NVDA...)" autocomplete="off" spellcheck="false"
+    <input id="hsinp" placeholder="Search stock worldwide (TCS, AAPL, NVDA, Reliance...)" autocomplete="off" spellcheck="false"
       oninput="hsSearch(this.value)" onkeydown="if(event.key==='Enter')hsAnalyze()">
     <button class="hsbtn" onclick="hsAnalyze()">ANALYZE</button>
     <div class="sdrop" id="sdrop"></div>
@@ -1143,6 +1459,7 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   <div class="hright">
     <div class="livebadge"><div class="ldot"></div>LIVE</div>
     <div class="hclk" id="clk"></div>
+    <button class="settbtn" onclick="openSettings()">⚙️ Settings</button>
   </div>
 </header>
 <div class="tape"><div class="tape-r" id="tape"><span class="ti" style="color:var(--t2)">Loading live data...</span></div></div>
@@ -1150,6 +1467,7 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   <button class="tab on" onclick="go('overview',this)">📊 Overview</button>
   <button class="tab" onclick="go('world',this)">🌍 World</button>
   <button class="tab" onclick="go('india',this)">🇮🇳 India</button>
+  <button class="tab" onclick="go('impact',this)">🔗 Global→India Impact</button>
   <button class="tab" onclick="go('sectors',this)">📂 Sectors</button>
   <button class="tab" onclick="go('bonds',this)">📈 Bonds &amp; Crypto</button>
   <button class="tab" onclick="go('forex',this)">💱 Forex</button>
@@ -1157,44 +1475,62 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   <button class="tab" onclick="go('chat',this)">🤖 AI Chat</button>
 </nav>
 <main>
+
+<!-- OVERVIEW PANEL -->
 <div id="panel-overview" class="panel on">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.2rem;flex-wrap:wrap;gap:.5rem">
     <div class="ph">Market <span>Overview</span></div>
     <div style="display:flex;align-items:center;gap:.5rem;font-size:.65rem;color:var(--t2)">
       <div class="ldot" style="background:var(--c)"></div>
-      <span id="last-refresh-lbl">Prices auto-refresh every 5s</span>
+      <span id="last-refresh-lbl">Auto-refresh every 5s</span>
     </div>
   </div>
-  <p class="ps">Live prices · Auto-refresh every 5 seconds · No manual reload needed</p>
+  <p class="ps">Live prices · Auto-refresh every 5 seconds · Click any index to deep analyze</p>
   <div class="g2" style="margin-bottom:.9rem">
     <div class="card">
-      <div class="ctitle">🇮🇳 Indian Indices <span style="font-size:.5rem;color:var(--g);margin-left:4px;letter-spacing:0">● LIVE</span></div>
-      <div id="ov-india">SKEL_ROWS_6</div>
+      <div class="ctitle">🇮🇳 Indian Indices <span style="font-size:.5rem;color:var(--g);margin-left:4px">● LIVE</span></div>
+      <div id="ov-india"><div class="skel sm"></div><div class="skel"></div><div class="skel sm"></div><div class="skel"></div><div class="skel sm"></div></div>
     </div>
     <div class="card">
-      <div class="ctitle">🌍 Global Indices <span style="font-size:.5rem;color:var(--g);margin-left:4px;letter-spacing:0">● LIVE</span></div>
-      <div id="ov-global">SKEL_ROWS_6</div>
+      <div class="ctitle">🌍 Global Indices <span style="font-size:.5rem;color:var(--g);margin-left:4px">● LIVE</span></div>
+      <div id="ov-global"><div class="skel sm"></div><div class="skel"></div><div class="skel sm"></div><div class="skel"></div></div>
     </div>
   </div>
   <div class="g3">
-    <div class="card"><div class="ctitle">🥇 Commodities &amp; Crypto</div><div id="ov-bonds">SKEL_ROWS_5</div></div>
-    <div class="card"><div class="ctitle">💱 Key Forex</div><div id="ov-forex">SKEL_ROWS_4</div></div>
-    <div class="card"><div class="ctitle">📰 Headlines</div><div id="ov-news">SKEL_ROWS_4</div></div>
+    <div class="card"><div class="ctitle">🥇 Commodities &amp; Crypto</div><div id="ov-bonds"><div class="skel"></div><div class="skel sm"></div><div class="skel"></div></div></div>
+    <div class="card"><div class="ctitle">💱 Key Forex</div><div id="ov-forex"><div class="skel"></div><div class="skel sm"></div></div></div>
+    <div class="card">
+      <div class="ctitle">📰 Top Headlines <span style="font-size:.5rem;color:var(--amber);margin-left:4px">● LIVE</span></div>
+      <div id="ov-news"><div class="skel sm"></div><div class="skel"></div><div class="skel sm"></div></div>
+    </div>
   </div>
 </div>
+
+<!-- WORLD PANEL -->
 <div id="panel-world" class="panel">
   <div class="ph">🌍 World <span>Trend</span></div>
   <p class="ps">Global breadth · Sentiment · VIX · Fear gauge</p>
   <div id="wc"><div class="ldc"><div class="spin"></div> Loading world data…</div></div>
 </div>
+
+<!-- INDIA PANEL -->
 <div id="panel-india" class="panel">
   <div class="ph">🇮🇳 India <span>Trend</span></div>
-  <p class="ps">NIFTY · SENSEX · Sectors · Stocks · INR</p>
+  <p class="ps">NIFTY · SENSEX · Sectors · Top Movers · INR</p>
   <div id="ic-main"><div class="ldc"><div class="spin"></div> Loading India data…</div></div>
 </div>
+
+<!-- GLOBAL → INDIA IMPACT PANEL -->
+<div id="panel-impact" class="panel">
+  <div class="ph">🔗 Global → India <span>Impact</span></div>
+  <p class="ps">How today's global market moves affect Indian stocks & NIFTY — Live analysis</p>
+  <div id="impact-c"><div class="ldc"><div class="spin"></div> Analyzing global-India linkages…</div></div>
+</div>
+
+<!-- SECTORS PANEL -->
 <div id="panel-sectors" class="panel">
   <div class="ph">📂 Sector <span>Analysis</span></div>
-  <p class="ps">Global ETFs &amp; Indian sector performance</p>
+  <p class="ps">Global ETFs &amp; Indian sector performance heatmap</p>
   <div style="display:flex;gap:.35rem;margin-bottom:.9rem;flex-wrap:wrap" id="sec-btns">
     <button class="tab on" onclick="setSP('week',this)" style="border-radius:15px;padding:4px 12px;font-size:.65rem">1 Week</button>
     <button class="tab" onclick="setSP('month',this)" style="border-radius:15px;padding:4px 12px;font-size:.65rem">1 Month</button>
@@ -1202,73 +1538,80 @@ main{position:relative;z-index:1;max-width:1800px;margin:0 auto;padding:.8rem}
   </div>
   <div id="sec-c"><div class="ldc"><div class="spin"></div> Loading sectors…</div></div>
 </div>
+
+<!-- BONDS PANEL -->
 <div id="panel-bonds" class="panel">
   <div class="ph">📈 Bonds <span>&amp; Crypto</span></div>
-  <p class="ps">Gold · Oil · Bitcoin · Ethereum · Treasuries</p>
-  <div class="g5" id="bonds-g"><div class="ldc" style="grid-column:1/-1">SKEL_IC_8</div></div>
+  <p class="ps">Gold · Silver · Oil · Bitcoin · Ethereum · Treasuries</p>
+  <div class="g5" id="bonds-g"><div class="ldc" style="grid-column:1/-1"><div class="spin"></div> Loading…</div></div>
 </div>
+
+<!-- FOREX PANEL -->
 <div id="panel-forex" class="panel">
   <div class="ph">💱 <span>Forex</span></div>
-  <p class="ps">USD/INR &amp; major pairs · Live rates</p>
-  <div class="g5" id="forex-g"><div class="ldc" style="grid-column:1/-1">SKEL_IC_6</div></div>
+  <p class="ps">USD/INR &amp; major currency pairs · Live rates</p>
+  <div class="g5" id="forex-g"><div class="ldc" style="grid-column:1/-1"><div class="spin"></div> Loading…</div></div>
 </div>
+
+<!-- NEWS PANEL -->
 <div id="panel-news" class="panel">
   <div class="ph">📰 Market <span>News</span></div>
-  <p class="ps">Yahoo Finance · Economic Times · Live headlines</p>
-  <div class="card" id="news-c"><div class="ldc"><div class="spin"></div> Fetching news…</div></div>
+  <p class="ps">Yahoo Finance · Economic Times · Moneycontrol · LiveMint · Reuters · CNBC TV18 — Auto-rotates every 60s</p>
+  <div class="news-rotate-bar"><div class="news-rotate-fill" id="news-rot-fill" style="width:0%"></div></div>
+  <div class="news-cnt" id="news-cnt">Loading headlines…</div>
+  <div id="news-c"><div class="ldc"><div class="spin"></div> Fetching news from 6 sources…</div></div>
 </div>
+
+<!-- CHAT PANEL -->
 <div id="panel-chat" class="panel">
   <div class="ph">🤖 AI <span>Analyst</span></div>
-  <p class="ps">8-Factor Future Score · Live data · Koi bhi language</p>
+  <p class="ps">8-Factor Future Score · Live data · Koi bhi language · Gemini + Claude powered</p>
   <div class="chatwrap">
     <div class="chhead">
       <div class="chavatar">🤖</div>
-      <div>
-        <div style="font-weight:700;font-size:.88rem">FinVision AI — 8-Factor Future Engine</div>
-        <div style="font-size:.65rem;color:var(--t2)">Hindi · English · Hinglish · Tamil · Marathi · Any language</div>
+      <div style="flex:1">
+        <div style="font-weight:700;font-size:.88rem">FinVision AI v6 — 8-Factor Future Engine</div>
+        <div style="font-size:.65rem;color:var(--t2)">Hindi · English · Hinglish · Tamil · Marathi · Telugu · Any language</div>
       </div>
+      <div id="gem-status" class="gemini-status gs-inactive">Gemini: OFF</div>
     </div>
     <div class="chmsg" id="chmsg">
-      <div class="msg ma">🙏 Namaste! Main hoon aapka FinVision AI v5 — ab 8-Factor Future Performance Engine ke saath!
+      <div class="msg ma">🙏 Namaste! Main hoon FinVision AI v6 — ab Global→India Impact + 8-Factor Future Engine ke saath!
 
-🔮 <strong>Future Performance Score (8 Factors):</strong>
-  📊 Analyst Consensus (28%) · 📈 Growth Trajectory (20%)
-  💰 Valuation/PEG (15%) · 🏥 Financial Health (12%)
-  ⚡ Technical Momentum (10%) · 🏛️ Institutional Ownership (8%)
-  📍 52W Position (4%) · 🛡️ Short Interest (3%)
+🔑 <strong>Gemini AI Setup:</strong> Header mein ⚙️ Settings click karo aur apna FREE Gemini API key paste karo.
 
-📡 <strong>Auto-Refresh:</strong> Prices update every 5 seconds automatically!
+🔮 <strong>8 Factors:</strong> Analyst (28%) · Growth (20%) · Valuation (15%) · Health (12%) · Technical (10%) · Ownership (8%) · 52W (4%) · Short (3%)
+
+🌍→🇮🇳 <strong>Global Impact Tab:</strong> Dekho kaise S&P500, Crude, DXY India ko affect karta hai!
 
 <strong>Try karo:</strong>
-• "TCS ka future outlook kya hai?"
-• "NVIDIA short/medium/long term analysis"
+• "TCS future outlook kya hai?"
+• "NVIDIA analysis with global impact"
 • "Reliance mein invest karein?"
-• "Aaj India market kaisa hai?"</div>
+• "Aaj global market India ko kaise affect karega?"</div>
     </div>
     <div class="qps">
       <button class="qp" onclick="qp('TCS 8-factor future performance analysis')">TCS Future Score</button>
       <button class="qp" onclick="qp('Reliance ka future outlook kya hai?')">Reliance (Hindi)</button>
       <button class="qp" onclick="qp('NVIDIA short medium long term analysis')">NVIDIA All Horizons</button>
+      <button class="qp" onclick="qp('Global market India ko aaj kaise affect karega?')">Global→India Impact</button>
       <button class="qp" onclick="qp('Aaj India market kaisa hai?')">India Today</button>
-      <button class="qp" onclick="qp('World market trend today')">World Trend</button>
+      <button class="qp" onclick="qp('HDFC Bank vs ICICI Bank future comparison')">HDFC vs ICICI</button>
+      <button class="qp" onclick="qp('Crude oil rising hai, India pe kya asar hoga?')">Crude Oil Impact</button>
       <button class="qp" onclick="qp('Gold vs Bitcoin abhi kaun behtar?')">Gold vs BTC</button>
-      <button class="qp" onclick="qp('HDFC Bank vs ICICI Bank comparison')">HDFC vs ICICI</button>
-      <button class="qp" onclick="qp('Infosys buy or sell with future score?')">Infosys Score</button>
     </div>
-    <div class="lhint">💬 Hindi, English, Hinglish, Tamil, Marathi, Telugu, Gujarati — koi bhi language chalti hai</div>
+    <div style="font-size:.6rem;color:var(--t3);padding:.25rem .9rem;text-align:center">
+      💬 Hindi, English, Hinglish, Tamil, Marathi, Telugu, Gujarati — koi bhi language chalti hai
+    </div>
     <div class="chin-row">
       <input class="chin" id="chin" placeholder="Koi bhi sawaal, koi bhi language..." onkeydown="if(event.key==='Enter')chat()">
       <button class="chsend" id="chsend" onclick="chat()">SEND</button>
     </div>
   </div>
 </div>
+
 </main>
-<div class="moverlay" id="moverlay">
-  <div class="modal">
-    <button class="mclose" onclick="closeMod()">✕</button>
-    <div id="mcont"><div class="ldc"><div class="spin"></div> Loading full analysis…</div></div>
-  </div>
-</div>
+
 <script>
 'use strict';
 const $=id=>document.getElementById(id);
@@ -1277,8 +1620,41 @@ const fp=n=>n!=null?`${Number(n)>0?'+':''}${f(n)}%`:'—';
 const pc=n=>Number(n)>0?'up':Number(n)<0?'dn':'neu';
 const bdg=n=>`<span class="bdg ${Number(n)>0?'bu':Number(n)<0?'bd':'bn'}">${fp(n)}</span>`;
 const api=url=>fetch(url).then(r=>r.json()).catch(()=>({}));
+
+// ─── CLOCK ───
 const tick=()=>{$('clk').textContent=new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata',hour12:true,hour:'2-digit',minute:'2-digit',second:'2-digit',day:'2-digit',month:'short'})+' IST'};
 setInterval(tick,1000);tick();
+
+// ─── SETTINGS ───
+let _geminiKey = localStorage.getItem('fv_gemini_key') || '';
+let _geminiModel = localStorage.getItem('fv_gemini_model') || 'gemini-1.5-flash';
+function openSettings(){
+  $('gemini-key-inp').value = _geminiKey;
+  $('gemini-model-sel').value = _geminiModel;
+  $('sett-overlay').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+function closeSettings(){
+  $('sett-overlay').classList.remove('open');
+  document.body.style.overflow='';
+}
+function saveSettings(){
+  _geminiKey = $('gemini-key-inp').value.trim();
+  _geminiModel = $('gemini-model-sel').value;
+  localStorage.setItem('fv_gemini_key', _geminiKey);
+  localStorage.setItem('fv_gemini_model', _geminiModel);
+  $('sett-ok').style.display='block';
+  updateGeminiStatus();
+  setTimeout(()=>{ $('sett-ok').style.display='none'; closeSettings(); }, 1200);
+}
+function updateGeminiStatus(){
+  const el=$('gem-status');
+  if(_geminiKey){ el.textContent='Gemini: ON ✓'; el.className='gemini-status gs-active'; }
+  else{ el.textContent='Gemini: OFF'; el.className='gemini-status gs-inactive'; }
+}
+updateGeminiStatus();
+
+// ─── HEADER SEARCH ───
 let _hsT=null;
 function hsSearch(v){
   clearTimeout(_hsT);const drop=$('sdrop');
@@ -1299,18 +1675,24 @@ function hsAnalyze(){
   $('sdrop').classList.remove('show');
   document.querySelectorAll('.tab').forEach(b=>b.classList.remove('on'));
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
-  document.querySelectorAll('nav .tab')[7].classList.add('on');
+  document.querySelectorAll('nav .tab')[8].classList.add('on');
   $('panel-chat').classList.add('on');
   $('chin').value=`Full 8-factor future analysis of ${v}`;chat();
 }
 document.addEventListener('click',e=>{if(!$('hsw').contains(e.target))$('sdrop').classList.remove('show');});
+
+// ─── TAB NAVIGATION ───
 const _loaded={};
 function go(name,btn){
   document.querySelectorAll('.panel').forEach(p=>p.classList.remove('on'));
   document.querySelectorAll('nav .tab').forEach(b=>b.classList.remove('on'));
   $(`panel-${name}`).classList.add('on');btn.classList.add('on');
-  if(!_loaded[name]){_loaded[name]=true;({world:loadWorld,india:loadIndia,sectors:loadSectors,bonds:loadBonds,forex:loadForex,news:loadNews})[name]?.();}
+  if(!_loaded[name]){_loaded[name]=true;
+    ({world:loadWorld,india:loadIndia,impact:loadImpact,sectors:loadSectors,bonds:loadBonds,forex:loadForex,news:loadNews})[name]?.();
+  }
 }
+
+// ─── LIVE PULSE ───
 let _liveData={};
 let _pulseInterval=null;
 const PULSE_INTERVAL=5000;
@@ -1352,9 +1734,7 @@ function flashLiveElements(ticker,fresh,old){
   if(!dir)return;
   const cls=dir==='up'?'flash-up':'flash-dn';
   document.querySelectorAll(`[data-live="${ticker}"]`).forEach(el=>{
-    el.classList.remove('flash-up','flash-dn');
-    el.offsetWidth;
-    el.classList.add(cls);
+    el.classList.remove('flash-up','flash-dn');el.offsetWidth;el.classList.add(cls);
     setTimeout(()=>el.classList.remove(cls),700);
   });
 }
@@ -1381,55 +1761,60 @@ function updateTapeLive(){
 function animateRing(){
   const circumference=2*Math.PI*15;
   const fill=$('rring-fill');if(!fill)return;
-  fill.style.strokeDasharray=circumference;
-  fill.style.strokeDashoffset=circumference;
+  fill.style.strokeDasharray=circumference;fill.style.strokeDashoffset=circumference;
   let start=null;
   function step(ts){
     if(!start)start=ts;
-    const elapsed=ts-start;
-    const progress=Math.min(elapsed/PULSE_INTERVAL,1);
+    const elapsed=ts-start;const progress=Math.min(elapsed/PULSE_INTERVAL,1);
     fill.style.strokeDashoffset=circumference*(1-progress);
-    if(progress<1)requestAnimationFrame(step);
-    else{start=null;requestAnimationFrame(step);}
+    if(progress<1)requestAnimationFrame(step);else{start=null;requestAnimationFrame(step);}
   }
   requestAnimationFrame(step);
 }
 function forceRefresh(){pulseFetch();}
+
+// ─── OVERVIEW ───
 async function loadOverview(){
   loadTape();
-  const[india,global,bonds,forex,news]=await Promise.all([
-    api('/api/indices/india'),api('/api/indices/global'),
-    api('/api/bonds'),api('/api/forex'),api('/api/news')
+  const[india,global,bonds,forex]=await Promise.all([
+    api('/api/indices/india'),api('/api/indices/global'),api('/api/bonds'),api('/api/forex')
   ]);
   $('ov-india').innerHTML=Object.entries(india).map(([n,v])=>{
     if(!v||!v.price)return'';
     const tk=_ALL_TICKERS[n]||'';const c=pc(v.change_pct);
-    return `<div class="sr" data-live-row="${tk}"><span class="sl">${n}</span><span class="sv">${f(v.price)} <span class="${c}" data-live="${tk}">${fp(v.change_pct)}</span></span></div>`;
-  }).join('')||err();
+    return `<div class="sr" data-live-row="${tk}" style="cursor:pointer" onclick="openStock('${tk||n}')"><span class="sl">${n}</span><span class="sv">${f(v.price)} <span class="${c}" data-live="${tk}">${fp(v.change_pct)}</span></span></div>`;
+  }).join('')||'<p style="color:var(--t2);font-size:.75rem">No data</p>';
   $('ov-global').innerHTML=Object.entries(global).map(([n,v])=>{
     if(!v||!v.price)return'';
     const tk=_ALL_TICKERS[n]||'';const c=pc(v.change_pct);
     return `<div class="sr" data-live-row="${tk}"><span class="sl">${n}</span><span class="sv">${f(v.price)} <span class="${c}" data-live="${tk}">${fp(v.change_pct)}</span></span></div>`;
-  }).join('')||err();
+  }).join('')||'<p style="color:var(--t2);font-size:.75rem">No data</p>';
   const bkeys=['Gold','Silver','Crude Oil (WTI)','Bitcoin','Ethereum','Solana'];
   $('ov-bonds').innerHTML=bkeys.map(k=>{
     const v=bonds[k];if(!v||!v.price)return'';const c=pc(v.change_pct);
     return `<div class="sr"><span class="sl">${k}</span><span class="sv">${f(v.price)} <span class="${c}">${fp(v.change_pct)}</span></span></div>`;
-  }).join('')||err();
+  }).join('')||'<p style="color:var(--t2);font-size:.75rem">No data</p>';
   const fkeys=['USD/INR','EUR/USD','GBP/USD','USD/JPY'];
   $('ov-forex').innerHTML=fkeys.map(k=>{
     const v=forex[k];if(!v||!v.price)return'';const c=pc(v.change_pct);
     return `<div class="sr"><span class="sl">${k}</span><span class="sv">${f(v.price,4)} <span class="${c}">${fp(v.change_pct)}</span></span></div>`;
-  }).join('')||err();
-  $('ov-news').innerHTML=(news||[]).slice(0,5).map(n=>
-    `<div class="ni"><div class="ndot"></div><div>
-      <div class="ntitle"><a class="nlink" href="${n.url}" target="_blank" rel="noopener">${n.title}</a></div>
-      <div class="nmeta">${n.source} · ${n.time}</div></div></div>`
-  ).join('')||err('No news');
+  }).join('')||'<p style="color:var(--t2);font-size:.75rem">No data</p>';
+  // Load overview news
+  loadOverviewNews();
   for(const[n,v]of Object.entries({...india,...global})){
     const tk=_ALL_TICKERS[n];if(tk&&v&&v.price)_liveData[tk]=v;
   }
   startPulse();
+}
+async function loadOverviewNews(){
+  const news=await api('/api/news');
+  const items=(news||[]).slice(0,5);
+  $('ov-news').innerHTML=items.map(n=>
+    `<div class="sr" style="flex-direction:column;align-items:flex-start;gap:2px;padding:.4rem 0">
+      <a href="${n.url}" target="_blank" rel="noopener" style="color:var(--t);text-decoration:none;font-size:.72rem;line-height:1.45;font-weight:500">${n.title.slice(0,75)}${n.title.length>75?'…':''}</a>
+      <span style="font-size:.58rem;color:var(--t3)">${n.source} · ${n.time}</span>
+    </div>`
+  ).join('')||'<p style="color:var(--t2);font-size:.75rem">No news</p>';
 }
 async function loadTape(){
   const[a,b]=await Promise.all([api('/api/indices/india'),api('/api/indices/global')]);
@@ -1440,7 +1825,8 @@ async function loadTape(){
   });
   if(items.length)$('tape').innerHTML=items.join('')+items.join('');
 }
-const err=(msg='No data available')=>`<p style="color:var(--t2);font-size:.75rem;padding:.3rem">${msg}</p>`;
+
+// ─── WORLD ───
 async function loadWorld(){
   $('wc').innerHTML='<div class="ldc"><div class="spin"></div> Fetching global data…</div>';
   const d=await api('/api/world-trend');
@@ -1449,7 +1835,7 @@ async function loadWorld(){
   const scol=s==='Bullish'?'var(--g)':s==='Bearish'?'var(--r)':'var(--gold)';
   const iH=Object.entries(d.indices||{}).map(([n,v])=>{
     if(!v||!v.price)return'';const c=pc(v.change_pct);
-    return `<div class="ic" onclick="openStock('${n}')"><div class="in">${n}</div><div class="ip">${f(v.price)}</div><div class="ic2 ${c}">${fp(v.change_pct)}</div></div>`;
+    return `<div class="ic"><div class="in">${n}</div><div class="ip">${f(v.price)}</div><div class="ic2 ${c}">${fp(v.change_pct)}</div></div>`;
   }).join('');
   $('wc').innerHTML=`
     <div class="g3" style="margin-bottom:.9rem">
@@ -1470,6 +1856,8 @@ async function loadWorld(){
     </div>
     <div class="card"><div class="ctitle">All Global Indices</div><div class="g4">${iH}</div></div>`;
 }
+
+// ─── INDIA ───
 async function loadIndia(){
   $('ic-main').innerHTML='<div class="ldc"><div class="spin"></div> Fetching India data…</div>';
   const[trend,stocks]=await Promise.all([api('/api/india-trend'),api('/api/stocks/india')]);
@@ -1510,17 +1898,110 @@ async function loadIndia(){
       </div>
     </div>
     <div class="card" style="margin-bottom:.9rem"><div class="ctitle">Sector Indices</div><div class="g4">${iH}</div></div>
-    <div class="card"><div class="ctitle">Top Movers</div>
+    <div class="card"><div class="ctitle">Top Movers — Indian Stocks</div>
       <div class="tbl-wrap"><table class="tbl"><thead><tr>
-        <th>Stock</th><th>Price</th><th>Chg</th><th>%</th><th>P/E</th><th></th>
+        <th>Stock</th><th>Price (₹)</th><th>Chg</th><th>%</th><th>P/E</th><th></th>
       </tr></thead><tbody>${tH}</tbody></table></div>
     </div>`;
 }
+
+// ─── GLOBAL → INDIA IMPACT ───
+async function loadImpact(){
+  $('impact-c').innerHTML='<div class="ldc"><div class="spin"></div> Analyzing global-India market linkages…</div>';
+  const d=await api('/api/global-india-impact');
+  const impacts=d.impacts||[];
+  const overall=d.overall||{};
+  const sig=overall.overall_signal||'Neutral';
+  const sigCol=sig==='Bullish'?'var(--g)':sig==='Bearish'?'var(--r)':'var(--gold)';
+  const netMove=overall.net_expected_nifty_move||0;
+  const moveClass=netMove>0?'pos':netMove<0?'neg':'neu';
+  const headerH=`
+    <div class="impact-header">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.5rem">
+        <div>
+          <div style="font-size:.58rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--t2);margin-bottom:.3rem">TODAY'S GLOBAL → INDIA SIGNAL</div>
+          <div class="impact-signal"><span style="color:${sigCol}">${sig}</span>
+            <span class="impact-move ${moveClass}">${netMove>0?'+':''}${netMove}% est. NIFTY move</span>
+          </div>
+          <div style="font-size:.7rem;color:var(--t2);margin-top:.3rem">
+            NIFTY 50: <strong style="color:var(--t)">${f(overall.nifty_current)}</strong>
+            <span class="${pc(overall.nifty_change)}" style="margin-left:5px">${fp(overall.nifty_change)}</span>
+          </div>
+        </div>
+        <div style="text-align:right">
+          <div style="font-size:.58rem;color:var(--t3);letter-spacing:1px">BASED ON ${impacts.length} GLOBAL FACTORS</div>
+          <div style="font-size:.65rem;color:var(--t2);margin-top:.2rem">Live data · Updates every 2 min</div>
+        </div>
+      </div>
+    </div>`;
+  const impH=impacts.map(imp=>{
+    const dirClass=imp.direction==='positive'?'positive':imp.direction==='negative'?'negative':'mixed';
+    const chgClass=pc(imp.change);
+    const moveVal=imp.expected_nifty_move||0;
+    const moveCls=moveVal>0?'pos':moveVal<0?'neg':'neu';
+    const magCls='mag-'+(imp.magnitude||'mild');
+    return `<div class="impact-card ${dirClass}">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:.5rem;flex-wrap:wrap">
+        <div style="flex:1">
+          <div class="impact-src">
+            <span style="font-size:1rem">${imp.icon}</span>
+            <span>${imp.source}</span>
+            <span class="${chgClass}" style="font-family:'Share Tech Mono',monospace;font-size:.72rem">${fp(imp.change)}</span>
+            <span class="imp-mag ${magCls}">${imp.magnitude}</span>
+            <span style="font-size:.58rem;color:var(--t3)">Confidence: ${imp.confidence}</span>
+          </div>
+          <div class="impact-reason">${imp.reason}</div>
+          <div class="impact-sector">📍 ${imp.sector_impact}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0">
+          <div style="font-size:.55rem;color:var(--t3);margin-bottom:2px">Est. NIFTY</div>
+          <div class="impact-move ${moveCls}">${moveVal>0?'+':''}${moveVal}%</div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  const risks=overall.key_risks||[];
+  const tails=overall.key_tailwinds||[];
+  const rtH=`
+    <div class="risk-tail-grid">
+      <div class="risk-box risks">
+        <div style="font-size:.6rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--r);margin-bottom:.5rem">⚠️ Key Risks Today</div>
+        ${risks.length?risks.map(r=>`<div class="risk-item">${r}</div>`).join(''):'<div class="risk-item" style="color:var(--g)">No major risks identified</div>'}
+      </div>
+      <div class="risk-box tails">
+        <div style="font-size:.6rem;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--g);margin-bottom:.5rem">🚀 Key Tailwinds Today</div>
+        ${tails.length?tails.map(t=>`<div class="risk-item">${t}</div>`).join(''):'<div class="risk-item" style="color:var(--t2)">No major tailwinds identified</div>'}
+      </div>
+    </div>`;
+  const howH=`
+    <div class="card" style="margin-top:.9rem">
+      <div class="ctitle">📚 How Global Markets Affect India — Explained</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:.7rem">
+        ${[
+          ['🇺🇸 S&P 500 / Dow Jones','When US markets rise, FII (Foreign Institutional Investors) feel confident → they buy Indian stocks → NIFTY rises. Indian IT companies (TCS, Infosys) earn in USD, so US market health directly impacts them.'],
+          ['🛢️ Crude Oil Price','India imports ~85% of its oil. Rising crude = higher import bill = wider Current Account Deficit = INR weakens = inflation rises = RBI raises rates = stock markets fall. Only ONGC, Oil India benefit.'],
+          ['💱 USD/INR Rate','Weak INR (high USD/INR) = IT exporters earn more in INR = TCS, Infosys rally. But importers (electronics, pharma ingredients) suffer. FIIs may reduce exposure due to currency risk.'],
+          ['🏛️ US Bond Yields','High US 10Y yield (>4.5%) attracts global money to "safe" US bonds → FIIs pull out from India → NIFTY falls. Low yields = money flows to EM (Emerging Markets) like India = bullish.'],
+          ['🇨🇳 China Markets','China is India\'s largest trade partner. Strong China = high demand for metals (coal, iron) = Tata Steel, SAIL, Hindalco benefit. Weak China = commodity price crash = metal stocks fall.'],
+          ['🥇 Gold Price','India is world\'s #1 gold consumer. Rising gold = Titan, Kalyan, PC Jeweller rally. Also signals global fear/uncertainty. RBI gold reserves strengthen INR when gold rises.'],
+        ].map(([title,text])=>`
+          <div style="background:var(--s2);border:1px solid var(--border);border-radius:8px;padding:.75rem">
+            <div style="font-size:.72rem;font-weight:700;color:var(--c);margin-bottom:.3rem">${title}</div>
+            <div style="font-size:.68rem;color:var(--t2);line-height:1.65">${text}</div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  $('impact-c').innerHTML=headerH+`<div style="margin-bottom:.7rem">${impH}</div>`+rtH+howH+
+    `<div style="font-size:.62rem;color:var(--t3);text-align:center;padding:.8rem 0">
+      ⚠️ Impact analysis is indicative only. Actual market movements depend on many factors. Educational purpose only.
+    </div>`;
+}
+
+// ─── SECTORS ───
 let _secData=null,_secP='week';
 async function loadSectors(){
   $('sec-c').innerHTML='<div class="ldc"><div class="spin"></div> Loading sectors…</div>';
-  _secData=await api('/api/sectors');
-  renderSectors();
+  _secData=await api('/api/sectors');renderSectors();
 }
 function setSP(p,btn){_secP=p;document.querySelectorAll('#sec-btns .tab').forEach(b=>b.classList.remove('on'));btn.classList.add('on');if(_secData)renderSectors();}
 function renderSectors(){
@@ -1551,6 +2032,8 @@ function renderSectors(){
   };
   $('sec-c').innerHTML=tcard+rl(global,'🌍 Global Sector ETFs')+rl(indian,'🇮🇳 Indian Sector Indices');
 }
+
+// ─── BONDS / FOREX ───
 async function loadBonds(){
   const d=await api('/api/bonds');
   $('bonds-g').innerHTML=Object.entries(d).map(([n,v])=>{
@@ -1567,14 +2050,80 @@ async function loadForex(){
     return `<div class="ic"><div class="in">${n}</div><div class="ip">${f(v.price,4)}</div><div class="ic2 ${c}">${fp(v.change_pct)}</div></div>`;
   }).join('');
 }
+
+// ─── NEWS with 60s rotation ───
+let _allNews=[];
+let _newsPage=0;
+let _newsPerPage=12;
+let _newsRotTimer=null;
+let _newsRotProgress=0;
+const NEWS_ROTATE_INTERVAL=60000; // 60 seconds
+
 async function loadNews(){
-  const news=await api('/api/news');
-  $('news-c').innerHTML=news.map(n=>
-    `<div class="ni"><div class="ndot"></div><div>
-      <div class="ntitle"><a class="nlink" href="${n.url}" target="_blank" rel="noopener">${n.title}</a></div>
-      <div class="nmeta">${n.source} · ${n.time}</div></div></div>`
-  ).join('')||'<p style="color:var(--t2);padding:.5rem">No news scraped</p>';
+  $('news-c').innerHTML='<div class="ldc"><div class="spin"></div> Fetching news from 6 sources…</div>';
+  _allNews=await api('/api/news');
+  _newsPage=0;
+  renderNewsBatch();
+  startNewsRotation();
 }
+
+function renderNewsBatch(){
+  if(!_allNews||!_allNews.length){
+    $('news-c').innerHTML='<p style="color:var(--t2);padding:.5rem">No news available</p>';return;
+  }
+  // Rotate through different pages
+  const total=_allNews.length;
+  const start=(_newsPage*_newsPerPage)%total;
+  let batch=[];
+  for(let i=0;i<_newsPerPage;i++){
+    batch.push(_allNews[(start+i)%total]);
+  }
+  // Source color map
+  const srcColors={'Yahoo Finance':'#6264f5','Economic Times':'#e85d4a','Moneycontrol':'#3ab5e6','LiveMint':'#2d9c63','Reuters':'#ff8100','CNBC TV18':'#0078d4'};
+  $('news-cnt').textContent=`Showing ${batch.length} of ${total} headlines · Page ${_newsPage+1} · Rotates in 60s`;
+  $('news-c').innerHTML=`<div class="news-grid">${batch.map(n=>{
+    const col=srcColors[n.source]||'var(--c)';
+    return `<div class="news-card" style="--card-accent:${col}">
+      <div class="news-src-badge" style="background:${col}18;color:${col};border-color:${col}30">${n.source}</div>
+      <div class="news-title"><a href="${n.url}" target="_blank" rel="noopener">${n.title}</a></div>
+      <div class="news-meta">
+        <div class="news-dot"></div>
+        <span>${n.time}</span>
+      </div>
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function startNewsRotation(){
+  if(_newsRotTimer)clearInterval(_newsRotTimer);
+  _newsRotProgress=0;
+  // Update progress bar every second
+  const progressStep=100/60;
+  _newsRotTimer=setInterval(()=>{
+    _newsRotProgress+=progressStep;
+    const fill=$('news-rot-fill');
+    if(fill)fill.style.width=Math.min(_newsRotProgress,100)+'%';
+    if(_newsRotProgress>=100){
+      _newsRotProgress=0;
+      _newsPage=(_newsPage+1);
+      if(_newsPage*_newsPerPage>=_allNews.length){
+        // Re-fetch fresh news every full cycle
+        api('/api/news').then(data=>{
+          if(data&&data.length){_allNews=data;}
+          _newsPage=0;
+          renderNewsBatch();
+        });
+      } else {
+        renderNewsBatch();
+      }
+    }
+  },1000);
+}
+
+// Overview news auto-refresh every 60s
+setInterval(loadOverviewNews, 60000);
+
+// ─── STOCK MODAL ───
 let _ch=null;
 async function openStock(ticker){
   $('moverlay').classList.add('open');
@@ -1638,7 +2187,7 @@ async function openStock(ticker){
         ${w52bar}
         <div style="display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.4rem">
           <span style="font-size:.62rem;color:var(--t2)">P/E: <span style="color:var(--t)">${q.pe_ratio?f(q.pe_ratio,1):'—'}</span></span>
-          <span style="font-size:.62rem;color:var(--t2)">Vol: <span style="color:var(--t)">${a.vol_ratio?a.vol_ratio+'x':'—'}</span></span>
+          <span style="font-size:.62rem;color:var(--t2)">Vol Ratio: <span style="color:var(--t)">${a.vol_ratio?a.vol_ratio+'x':'—'}</span></span>
         </div>
       </div>
       <div class="card"><div class="ctitle">🔮 Future Score (8-Factor)</div>
@@ -1659,8 +2208,7 @@ async function openStock(ticker){
       <div class="fp-grid">${fpCardsH}</div>
     </div>
     <div class="card" style="margin-bottom:.9rem">
-      <div class="ctitle">⏱️ Multi-Horizon Outlook</div>
-      ${horizonH}
+      <div class="ctitle">⏱️ Multi-Horizon Outlook</div>${horizonH}
     </div>
     <div class="card" style="margin-bottom:.9rem">
       <div class="ctitle">Price Chart — 3 Months</div>
@@ -1668,27 +2216,23 @@ async function openStock(ticker){
     </div>
     <div class="sigwrap" style="margin-bottom:.9rem">${sigH}</div>
     <div class="g3" style="margin-bottom:.9rem">
-      <div class="card"><div class="ctitle">📈 Growth Metrics</div>
+      <div class="card"><div class="ctitle">📈 Growth</div>
         <div class="sr"><span class="sl">Earnings Growth</span><span class="sv ${pc(ol.earnings_growth_pct)}">${ol.earnings_growth_pct!=null?fp(ol.earnings_growth_pct):'—'}</span></div>
         <div class="sr"><span class="sl">Revenue Growth</span><span class="sv ${pc(ol.revenue_growth_pct)}">${ol.revenue_growth_pct!=null?fp(ol.revenue_growth_pct):'—'}</span></div>
-        <div class="sr"><span class="sl">Qtrly EPS Growth</span><span class="sv ${pc(ol.earnings_qoq)}">${ol.earnings_qoq!=null?fp(ol.earnings_qoq):'—'}</span></div>
         <div class="sr"><span class="sl">Profit Margin</span><span class="sv">${ol.profit_margin_pct!=null?f(ol.profit_margin_pct,1)+'%':'—'}</span></div>
-        <div class="sr"><span class="sl">Gross Margin</span><span class="sv">${fu.gross_margins?(fu.gross_margins*100).toFixed(1)+'%':'—'}</span></div>
         <div class="sr"><span class="sl">ROE</span><span class="sv">${fu.roe?(fu.roe*100).toFixed(1)+'%':'—'}</span></div>
+        <div class="sr"><span class="sl">EPS</span><span class="sv">${f(fu.eps)}</span></div>
       </div>
       <div class="card"><div class="ctitle">💰 Valuation</div>
         <div class="sr"><span class="sl">PEG Ratio</span><span class="sv" style="color:${(ol.peg_ratio||2)<1?'var(--g)':(ol.peg_ratio||2)<2?'var(--c)':'var(--r)'}">${f(ol.peg_ratio,2)}</span></div>
         <div class="sr"><span class="sl">Forward P/E</span><span class="sv">${f(ol.forward_pe,1)}</span></div>
         <div class="sr"><span class="sl">Trailing P/E</span><span class="sv">${f(ol.trailing_pe,1)}</span></div>
-        <div class="sr"><span class="sl">PE Expansion</span><span class="sv" style="font-size:.65rem">${ol.pe_expansion||'—'}</span></div>
         <div class="sr"><span class="sl">Price/Book</span><span class="sv">${f(fu.price_to_book,2)}</span></div>
-        <div class="sr"><span class="sl">EPS</span><span class="sv">${f(fu.eps)}</span></div>
       </div>
-      <div class="card"><div class="ctitle">🏥 Financial Health</div>
+      <div class="card"><div class="ctitle">🏥 Health</div>
         <div class="sr"><span class="sl">Debt/Equity</span><span class="sv" style="color:${(ol.debt_to_equity||100)<50?'var(--g)':(ol.debt_to_equity||100)<100?'var(--gold)':'var(--r)'}">${f(ol.debt_to_equity,1)}</span></div>
-        <div class="sr"><span class="sl">Current Ratio</span><span class="sv" style="color:${(ol.current_ratio||1)>1.5?'var(--g)':(ol.current_ratio||1)>1?'var(--gold)':'var(--r)'}">${f(ol.current_ratio,2)}</span></div>
+        <div class="sr"><span class="sl">Current Ratio</span><span class="sv">${f(ol.current_ratio,2)}</span></div>
         <div class="sr"><span class="sl">Free Cashflow</span><span class="sv ${pc(ol.free_cashflow_b)}">${ol.free_cashflow_b!=null?f(ol.free_cashflow_b)+'B':'—'}</span></div>
-        <div class="sr"><span class="sl">Beta</span><span class="sv">${f(fu.beta,2)}</span></div>
         <div class="sr"><span class="sl">Short Ratio</span><span class="sv">${f(ol.short_ratio,2)}</span></div>
         <div class="sr"><span class="sl">Dividend Yield</span><span class="sv">${ol.dividend_yield_pct!=null?f(ol.dividend_yield_pct,2)+'%':'—'}</span></div>
       </div>
@@ -1697,43 +2241,26 @@ async function openStock(ticker){
       <div class="card"><div class="ctitle">🎯 1-Year Price Scenarios</div>
         <div style="font-size:.65rem;color:var(--t2);margin-bottom:.5rem">Current: <strong style="color:var(--t)">${f(curr)} ${q.currency||''}</strong></div>
         ${scH}
-        <div style="margin-top:.8rem;font-size:.62rem;color:var(--t3)">Based on analyst targets + growth + momentum</div>
       </div>
-      <div class="card"><div class="ctitle">📈 Technical Indicators</div>
+      <div class="card"><div class="ctitle">📈 Technicals</div>
         ${[['RSI',`${f(a.rsi,1)} ${(a.rsi||50)>70?'🔴 OB':(a.rsi||50)<30?'🟢 OS':'Neutral'}`],
-           ['Stochastic',a.stoch_k!=null?`${a.stoch_k}% ${a.stoch_k>80?'🔴 OB':a.stoch_k<20?'🟢 OS':'OK'}`:'—'],
-           ['MACD vs Signal',a.macd&&a.signal?((a.macd>a.signal)?'Bullish ▲':'Bearish ▼'):'—'],
-           ['MA20',f(a.ma20)],['MA50',f(a.ma50)],['MA200',f(a.ma200)],
-           ['Bollinger Upper',f(a.bb_upper)],['Bollinger Lower',f(a.bb_lower)],
+           ['MACD',a.macd&&a.signal?((a.macd>a.signal)?'Bullish ▲':'Bearish ▼'):'—'],
+           ['MA20/50/200',`${f(a.ma20,0)}/${f(a.ma50,0)}/${f(a.ma200,0)}`],
            ['Support',f(a.support)],['Resistance',f(a.resistance)],
-           ['ATR Volatility',a.atr_pct?a.atr_pct+'%':'—'],
-           ['Vol Ratio',a.vol_ratio?a.vol_ratio+'x':'—'],['OBV Trend',a.obv_trend||'—'],
-           ['Momentum',a.momentum_score?a.momentum_score+'/100':'—']
+           ['OBV Trend',a.obv_trend||'—'],['Momentum',a.momentum_score?a.momentum_score+'/100':'—']
           ].map(([l,v])=>`<div class="sr"><span class="sl">${l}</span><span class="sv">${v}</span></div>`).join('')}
       </div>
     </div>
-    <div class="g2">
-      <div class="card"><div class="ctitle">🏛️ Ownership &amp; Fundamentals</div>
-        <div class="sr"><span class="sl">Insiders Hold</span><span class="sv">${ol.insider_pct!=null?f(ol.insider_pct,1)+'%':'—'}</span></div>
-        <div class="sr"><span class="sl">Institutions Hold</span><span class="sv">${ol.institution_pct!=null?f(ol.institution_pct,1)+'%':'—'}</span></div>
-        <div class="sr"><span class="sl">Payout Ratio</span><span class="sv">${ol.payout_ratio_pct!=null?f(ol.payout_ratio_pct,1)+'%':'—'}</span></div>
-        <div class="sr"><span class="sl">52W Position</span><span class="sv">${ol.week52_position_pct!=null?f(ol.week52_position_pct,1)+'%':'—'}</span></div>
-        <div class="sr"><span class="sl">Price vs MA50</span><span class="sv ${pc(ol.price_vs_ma50)}">${ol.price_vs_ma50!=null?fp(ol.price_vs_ma50):'—'}</span></div>
-        <div class="sr"><span class="sl">ROA</span><span class="sv">${fu.roa?(fu.roa*100).toFixed(1)+'%':'—'}</span></div>
-      </div>
-      ${fu.summary?`<div class="card"><div class="ctitle">About</div><p style="font-size:.78rem;line-height:1.75;color:var(--t2)">${fu.summary}</p></div>`
-        :'<div class="card"><div class="ctitle">About</div><p style="color:var(--t2);font-size:.76rem">No description available</p></div>'}
-    </div>
+    ${fu.summary?`<div class="card" style="margin-bottom:.9rem"><div class="ctitle">About</div><p style="font-size:.78rem;line-height:1.75;color:var(--t2)">${fu.summary}</p></div>`:''}
     <div style="font-size:.62rem;color:var(--t3);text-align:center;padding:.8rem 0">
-      ⚠️ Educational purpose only. Not investment advice. Consult a SEBI-registered advisor before investing.
+      ⚠️ Educational purpose only. Not investment advice. Consult SEBI-registered advisor before investing.
     </div>`;
   if(h.length>1){
     if(_ch){_ch.destroy();_ch=null;}
     setTimeout(()=>{
       const el=document.getElementById('dch');if(!el)return;
       const prices=h.map(x=>x.close);
-      const bull=prices[prices.length-1]>=prices[0];
-      const col=bull?'#00ff88':'#ff2244';
+      const bull=prices[prices.length-1]>=prices[0];const col=bull?'#00ff88':'#ff2244';
       _ch=new Chart(el.getContext('2d'),{type:'line',
         data:{labels:h.map(x=>x.date),datasets:[{data:prices,borderColor:col,borderWidth:1.5,fill:true,tension:.35,
           backgroundColor:ctx=>{const g=ctx.chart.ctx.createLinearGradient(0,0,0,240);g.addColorStop(0,col+'40');g.addColorStop(1,col+'00');return g;},
@@ -1748,6 +2275,9 @@ async function openStock(ticker){
 }
 function closeMod(){$('moverlay').classList.remove('open');document.body.style.overflow='';if(_ch){_ch.destroy();_ch=null;}}
 $('moverlay').addEventListener('click',e=>{if(e.target===$('moverlay'))closeMod();});
+$('sett-overlay').addEventListener('click',e=>{if(e.target===$('sett-overlay'))closeSettings();});
+
+// ─── CHAT ───
 function qp(t){$('chin').value=t;chat();}
 async function chat(){
   const inp=$('chin'),q=inp.value.trim();if(!q)return;
@@ -1758,13 +2288,16 @@ async function chat(){
   a.innerHTML='<div class="spin" style="display:inline-block;vertical-align:middle;margin-right:5px"></div>Analyzing with 8-Factor Future Engine…';
   box.appendChild(a);box.scrollTop=box.scrollHeight;
   try{
-    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q})});
+    const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:q,gemini_key:_geminiKey})});
     const data=await r.json();
     let ans=(data.answer||'No response.').replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/_(.*?)_/g,'<em>$1</em>');
     a.innerHTML=ans;
   }catch(e){a.innerHTML=`<span style="color:var(--r)">Error: ${e.message}</span>`;}
   btn.disabled=false;box.scrollTop=box.scrollHeight;inp.focus();
 }
+
+// ─── INIT ───
 loadOverview();
 _loaded['overview']=true;
 </script>
@@ -1783,13 +2316,15 @@ def index():
         )
     return _HTML
 
-# Vercel requires the app object to be importable at module level
-# No __main__ guard needed for Vercel, but kept for local dev
 if __name__ == "__main__":
     print("""
- ╔══════════════════════════════════════════╗
- ║   FinVision v5.1 — Vercel Ready         ║
- ║   Open: http://localhost:5000           ║
- ╚══════════════════════════════════════════╝
+ ╔══════════════════════════════════════════════╗
+ ║   FinVision v6.0 — Enhanced Edition         ║
+ ║   ✅ Global→India Impact Analysis           ║
+ ║   ✅ Gemini API Key in Settings             ║
+ ║   ✅ News from 6 sources, rotates 60s       ║
+ ║   ✅ 8-Factor AI Score                      ║
+ ║   Open: http://localhost:5000               ║
+ ╚══════════════════════════════════════════════╝
 """)
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
