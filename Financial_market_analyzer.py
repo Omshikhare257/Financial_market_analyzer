@@ -1,13 +1,31 @@
 #!/usr/bin/env python3
 """
-FinVision v6.0 — Backend (app.py)
+FinVision v6.1 — Backend (app.py)
 Run: python app.py
-Frontend auto-opens in browser at http://localhost:5000
+
+=== SETUP ===
+1. Install packages:
+   pip install flask yfinance pandas numpy requests beautifulsoup4 anthropic lxml
+
+2. SET YOUR API KEYS HERE (lines 30-35):
+   GEMINI_API_KEY  = "YOUR_GEMINI_KEY_HERE"
+   ANTHROPIC_API_KEY = "YOUR_ANTHROPIC_KEY_HERE"
+
+3. Run: python app.py
+   Opens: http://localhost:5000
 """
 
 import os, re, json, threading, time, webbrowser
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ═══════════════════════════════════════════════════════
+#  🔑 API KEYS — PASTE YOUR KEYS HERE
+# ═══════════════════════════════════════════════════════
+GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY", "YOUR_GEMINI_API_KEY_HERE")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY_HERE")
+GEMINI_MODEL      = "gemini-1.5-flash"   # or gemini-2.0-flash, gemini-1.5-pro
+# ═══════════════════════════════════════════════════════
 
 try:
     from flask import Flask, jsonify, request, send_from_directory
@@ -24,12 +42,12 @@ except ImportError as e:
 
 try:
     import anthropic as _anthropic_lib
-    _ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-    AI_AVAILABLE = bool(_ANTHROPIC_KEY)
+    AI_AVAILABLE = bool(ANTHROPIC_API_KEY and ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE")
 except ImportError:
     _anthropic_lib = None
-    _ANTHROPIC_KEY = ""
     AI_AVAILABLE = False
+
+GEMINI_AVAILABLE = bool(GEMINI_API_KEY and GEMINI_API_KEY != "YOUR_GEMINI_API_KEY_HERE")
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 app.secret_key = os.environ.get("SECRET_KEY", "finvision_v6_2025")
@@ -42,7 +60,6 @@ _LIVE_LOCK = threading.Lock()
 _LIVE_TTL = 5
 
 def cache_get(key, ttl=None):
-    
     with _CACHE_LOCK:
         item = _CACHE.get(key)
         t = ttl if ttl is not None else _CACHE_TTL
@@ -348,6 +365,23 @@ def _technical_analysis(ticker):
         year_high = float(close.tail(252).max())
         year_low = float(close.tail(252).min())
         week52_pos = safe_float((curr - year_low) / (year_high - year_low) * 100 if year_high != year_low else 50, 1)
+
+        # ADX calculation
+        plus_dm = high.diff()
+        minus_dm = low_col.diff()
+        plus_dm = plus_dm.where((plus_dm > 0) & (plus_dm > -minus_dm), 0.0)
+        minus_dm = (-minus_dm).where((-minus_dm > 0) & (-minus_dm > plus_dm), 0.0)
+        tr_adx = pd.DataFrame({'hl': high - low_col, 'hc': (high - close.shift()).abs(), 'lc': (low_col - close.shift()).abs()}).max(axis=1)
+        atr14 = tr_adx.rolling(14).mean()
+        plus_di = 100 * (plus_dm.rolling(14).mean() / atr14)
+        minus_di = 100 * (minus_dm.rolling(14).mean() / atr14)
+        dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di).abs())
+        adx_val = float(dx.rolling(14).mean().iloc[-1]) if not dx.isna().all() else 20.0
+
+        # SMA200 distance
+        sma200_dist = safe_float((curr - ma200) / ma200 * 100, 2) if ma200 else None
+
+        # Momentum score
         score = 50
         if curr > ma20: score += 8
         if curr > ma50: score += 8
@@ -358,6 +392,7 @@ def _technical_analysis(ticker):
         if vol_ratio > 1.2: score += 5
         if obv_trend == "Rising": score += 10
         score = min(100, max(0, score))
+
         signals = []
         signals.append("Above MA20 ▲" if curr > ma20 else "Below MA20 ▼")
         signals.append("Above MA50 ▲" if curr > ma50 else "Below MA50 ▼")
@@ -368,6 +403,7 @@ def _technical_analysis(ticker):
         if vol_ratio > 1.5: signals.append(f"High Volume {vol_ratio:.1f}x ⚡")
         if stoch_k < 20: signals.append("Stoch Oversold 🟢")
         elif stoch_k > 80: signals.append("Stoch Overbought 🔴")
+
         return {
             "current_price": safe_float(curr),
             "ma20": safe_float(ma20), "ma50": safe_float(ma50), "ma200": safe_float(ma200),
@@ -379,6 +415,8 @@ def _technical_analysis(ticker):
             "stoch_k": safe_float(stoch_k, 1), "atr_pct": atr_pct,
             "week52_pos": week52_pos,
             "year_high": safe_float(year_high), "year_low": safe_float(year_low),
+            "adx": safe_float(adx_val, 2),
+            "sma200_dist": sma200_dist,
         }
     except Exception as e:
         return {"error": str(e)[:60]}
@@ -757,13 +795,14 @@ def _global_india_impact():
         return {"impacts": [], "overall": {"net_expected_nifty_move": 0, "overall_signal": "Neutral"}, "error": str(e)}
 
 def _scrape_news(query=None):
-    cache_key = f"news_{query}" if query else "news"
-    cached = cache_get(cache_key, ttl=55)
+    cache_key = f"news_{query}" if query else "news_main"
+    cached = cache_get(cache_key, ttl=30)
     if cached: return cached
     news = []
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
     }
     if query:
         sources = [
@@ -813,7 +852,7 @@ def _scrape_news(query=None):
             unique_news.append(item)
     import random
     random.shuffle(unique_news)
-    final = unique_news[:40]
+    final = unique_news[:60]
     cache_set(cache_key, final)
     return final
 
@@ -844,110 +883,588 @@ def _search_stock(query):
         results.append({"name": q, "ticker": q})
     return results[:8]
 
-def _ai_chat(question, gemini_key=None):
+
+# ═══════════════════════════════════════════════════════
+#  🤖 AGENTIC AI — V58-STYLE DEEP STOCK ANALYSIS ENGINE
+#  Mimics the Trend Engine V58 Batch Report format:
+#  Stage 1: Live Data Gathering → Stage 2: Deep Analysis
+# ═══════════════════════════════════════════════════════
+
+def _build_v58_context(ticker):
+    """
+    Agentic Stage 1: Gather all live data and compute V58-style metrics.
+    Returns a structured dict matching the V58 batch report format.
+    """
+    try:
+        info = yf.Ticker(ticker).info or {}
+        hist_1y = yf.Ticker(ticker).history(period="1y", auto_adjust=True, timeout=12)
+        hist_3m = yf.Ticker(ticker).history(period="3mo", auto_adjust=True, timeout=10)
+
+        # ── Price & Basic
+        curr = safe_float(info.get("currentPrice") or info.get("regularMarketPrice"))
+        prev_close = safe_float(info.get("previousClose") or info.get("regularMarketPreviousClose"))
+        change_pct = round((curr - prev_close) / prev_close * 100, 2) if curr and prev_close and prev_close != 0 else 0.0
+
+        # ── Fundamentals
+        roe = safe_float((info.get("returnOnEquity") or 0) * 100, 2)
+        eps_growth = safe_float((info.get("earningsGrowth") or 0) * 100, 2)
+        rev_growth = safe_float((info.get("revenueGrowth") or 0) * 100, 2)
+        peg = safe_float(info.get("pegRatio"))
+        pe_ttm = safe_float(info.get("trailingPE"))
+        forward_pe = safe_float(info.get("forwardPE"))
+        profit_margin = safe_float((info.get("profitMargins") or 0) * 100, 2)
+        debt_equity = safe_float(info.get("debtToEquity"))
+        current_ratio = safe_float(info.get("currentRatio"))
+        insider_pct = safe_float((info.get("heldPercentInsiders") or 0) * 100, 2)
+        inst_pct = safe_float((info.get("heldPercentInstitutions") or 0) * 100, 2)
+        short_ratio = safe_float(info.get("shortRatio"))
+        beta = safe_float(info.get("beta"))
+        fcf = info.get("freeCashflow")
+        fcf_cr = round(fcf / 1e7, 2) if fcf else None  # Convert to Crores
+
+        # ── Piotroski F-Score (simplified)
+        piotroski = 5  # default
+        p_score = 0
+        if roe and roe > 0: p_score += 1
+        if fcf and fcf > 0: p_score += 1
+        if eps_growth and eps_growth > 0: p_score += 1
+        if rev_growth and rev_growth > 0: p_score += 1
+        if debt_equity is not None and debt_equity < 100: p_score += 1
+        if current_ratio and current_ratio > 1: p_score += 1
+        if profit_margin and profit_margin > 5: p_score += 1
+        if inst_pct and inst_pct > 30: p_score += 1
+        if beta and beta < 1.5: p_score += 1
+        piotroski = min(9, max(1, p_score))
+
+        # ── Technicals
+        ta_data = {}
+        adx_val = 20.0
+        sma200_dist = None
+        momentum_score = 50
+        rsi_val = 50.0
+        w52_high = safe_float(info.get("fiftyTwoWeekHigh"))
+        w52_low = safe_float(info.get("fiftyTwoWeekLow"))
+        dist_52w_high = round((curr - w52_high) / w52_high * 100, 2) if curr and w52_high else None
+        dist_52w_low = round((curr - w52_low) / w52_low * 100, 2) if curr and w52_low else None
+        pivot_dist = None
+        pivot_r1 = pivot_r2 = pivot_r3 = None
+        pivot_s1 = pivot_s2 = pivot_s3 = None
+
+        if not hist_1y.empty and len(hist_1y) >= 30:
+            close = hist_1y["Close"].astype(float)
+            high_s = hist_1y["High"].astype(float)
+            low_s = hist_1y["Low"].astype(float)
+
+            ma200 = float(close.rolling(200, min_periods=50).mean().iloc[-1])
+            ma50 = float(close.rolling(50).mean().iloc[-1])
+            ma20 = float(close.rolling(20).mean().iloc[-1])
+            sma200_dist = round((curr - ma200) / ma200 * 100, 2) if curr and ma200 else None
+
+            # RSI
+            delta = close.diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs = gain / loss
+            rsi_val = float((100 - 100 / (1 + rs)).iloc[-1])
+
+            # MACD
+            ema12 = close.ewm(span=12).mean()
+            ema26 = close.ewm(span=26).mean()
+            macd_v = float((ema12 - ema26).iloc[-1])
+            sig_v = float((ema12 - ema26).ewm(span=9).mean().iloc[-1])
+
+            # ADX
+            try:
+                plus_dm = high_s.diff().clip(lower=0)
+                minus_dm = (-low_s.diff()).clip(lower=0)
+                tr = pd.DataFrame({'hl': high_s - low_s, 'hc': (high_s - close.shift()).abs(), 'lc': (low_s - close.shift()).abs()}).max(axis=1)
+                atr14 = tr.rolling(14).mean()
+                plus_di = 100 * (plus_dm.rolling(14).mean() / atr14)
+                minus_di = 100 * (minus_dm.rolling(14).mean() / atr14)
+                dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10))
+                adx_val = float(dx.rolling(14).mean().iloc[-1])
+            except: pass
+
+            # Momentum score
+            ms = 50
+            if curr and curr > ma20: ms += 8
+            if curr and curr > ma50: ms += 8
+            if curr and curr > ma200: ms += 9
+            if macd_v > sig_v: ms += 10
+            if 30 < rsi_val < 70: ms += 5
+            if rsi_val > 50: ms += 5
+            if not hist_1y["Volume"].empty:
+                vol_ratio = float(hist_1y["Volume"].iloc[-1]) / (float(hist_1y["Volume"].rolling(20).mean().iloc[-1]) + 1e-10)
+                if vol_ratio > 1.2: ms += 5
+            momentum_score = min(100, max(0, ms))
+
+            # Pivot Points (using last 5 days high/low/close average)
+            if len(hist_1y) >= 5:
+                ph = float(high_s.tail(5).max())
+                pl = float(low_s.tail(5).min())
+                pc = float(close.iloc[-1])
+                pp = (ph + pl + pc) / 3
+                pivot_r1 = round((2 * pp - pl - curr) / curr * 100, 2) if curr else None
+                pivot_r2 = round((pp + (ph - pl) - curr) / curr * 100, 2) if curr else None
+                pivot_r3 = round((ph + 2 * (pp - pl) - curr) / curr * 100, 2) if curr else None
+                pivot_s1 = round((curr - (2 * pp - ph)) / curr * 100, 2) if curr else None
+                pivot_s2 = round((curr - (pp - (ph - pl))) / curr * 100, 2) if curr else None
+                pivot_s3 = round((curr - (pl - 2 * (ph - pp))) / curr * 100, 2) if curr else None
+                pivot_dist = round((curr - pp) / curr * 100, 2) if curr else None
+
+            ta_data = {
+                "ma20": safe_float(ma20), "ma50": safe_float(ma50), "ma200": safe_float(ma200),
+                "macd_bullish": macd_v > sig_v, "macd_val": safe_float(macd_v, 4), "signal_val": safe_float(sig_v, 4)
+            }
+
+        # ── Cash Flow
+        try:
+            cf = yf.Ticker(ticker).cashflow
+            if cf is not None and not cf.empty:
+                ops = safe_float(cf.iloc[:, 0].get("Operating Cash Flow", cf.iloc[:, 0].get("Total Cash From Operating Activities", 0)) / 1e7, 2)
+                inv = safe_float(cf.iloc[:, 0].get("Investing Cash Flow", cf.iloc[:, 0].get("Total Cashflows From Investing Activities", 0)) / 1e7, 2)
+                fin = safe_float(cf.iloc[:, 0].get("Financing Cash Flow", cf.iloc[:, 0].get("Total Cash From Financing Activities", 0)) / 1e7, 2)
+                net_cf = round((ops or 0) + (inv or 0) + (fin or 0), 2)
+            else:
+                ops = inv = fin = net_cf = None
+        except:
+            ops = inv = fin = net_cf = None
+
+        # ── Local Score (V58 style: 0-100)
+        local_score = 0
+        if sma200_dist and sma200_dist > 0: local_score += 10
+        elif sma200_dist and sma200_dist < -15: local_score -= 8
+        if rsi_val > 60: local_score += 12
+        elif rsi_val < 35: local_score -= 5
+        if momentum_score > 70: local_score += 15
+        elif momentum_score > 55: local_score += 8
+        if adx_val > 25: local_score += 10
+        if dist_52w_high and dist_52w_high > -10: local_score += 15
+        elif dist_52w_high and dist_52w_high < -30: local_score -= 10
+        if dist_52w_low and dist_52w_low > 50: local_score += 10
+        if eps_growth and eps_growth > 20: local_score += 10
+        elif eps_growth and eps_growth > 0: local_score += 5
+        if rev_growth and rev_growth > 10: local_score += 8
+        if piotroski >= 7: local_score += 8
+        elif piotroski <= 3: local_score -= 5
+        if pivot_dist and abs(pivot_dist) < 3: local_score += 5
+        local_score = min(100, max(0, local_score + 20))  # base of 20
+
+        # ── Verdict
+        if local_score >= 90: verdict = "STRONG BREAKOUT"
+        elif local_score >= 70: verdict = "ACCUMULATE"
+        elif local_score >= 45: verdict = "HOLD"
+        elif local_score >= 25: verdict = "UNDERPERFORM"
+        else: verdict = "AVOID"
+
+        # ── Leverage delta (EPS growth vs Rev growth gap)
+        leverage_delta = round((eps_growth or 0) - (rev_growth or 0), 2)
+
+        # ── Analyst data
+        analyst_target = safe_float(info.get("targetMeanPrice"))
+        analyst_upside = round((analyst_target - curr) / curr * 100, 2) if analyst_target and curr else None
+        analyst_rec = info.get("recommendationKey", "N/A")
+        analyst_count = info.get("numberOfAnalystOpinions", 0) or 0
+
+        return {
+            "ticker": info.get("longName") or ticker,
+            "nse": ticker,
+            "sector": info.get("sector", "N/A"),
+            "industry": info.get("industry", "N/A"),
+            "price": curr,
+            "change_pct": change_pct,
+            "roe": roe,
+            "piotroski": piotroski,
+            "eps_growth": eps_growth,
+            "rev_growth": rev_growth,
+            "peg": peg,
+            "pe_ttm": pe_ttm,
+            "forward_pe": forward_pe,
+            "rsi": safe_float(rsi_val, 2),
+            "momentum_score": momentum_score,
+            "adx": safe_float(adx_val, 2),
+            "sma200_dist": sma200_dist,
+            "leverage_delta": leverage_delta,
+            "dist_52w_high": dist_52w_high,
+            "dist_52w_low": dist_52w_low,
+            "w52_high": w52_high,
+            "w52_low": w52_low,
+            "beta": beta,
+            "insider_pct": insider_pct,
+            "inst_pct": inst_pct,
+            "short_ratio": short_ratio,
+            "profit_margin": profit_margin,
+            "debt_equity": debt_equity,
+            "current_ratio": current_ratio,
+            "pivot_dist": pivot_dist,
+            "pivot_r1": pivot_r1, "pivot_r2": pivot_r2, "pivot_r3": pivot_r3,
+            "pivot_s1": pivot_s1, "pivot_s2": pivot_s2, "pivot_s3": pivot_s3,
+            "cash_ops": ops, "cash_invest": inv, "cash_fin": fin, "net_cash": net_cf,
+            "fcf_cr": fcf_cr,
+            "analyst_target": analyst_target,
+            "analyst_upside": analyst_upside,
+            "analyst_rec": analyst_rec,
+            "analyst_count": analyst_count,
+            "local_score": local_score,
+            "verdict": verdict,
+            "ta": ta_data,
+            "summary": (info.get("longBusinessSummary") or "")[:400],
+            "market_cap": info.get("marketCap"),
+            "currency": info.get("currency", ""),
+            "dividend_yield": safe_float((info.get("dividendYield") or 0) * 100, 2),
+        }
+    except Exception as e:
+        return {"error": str(e), "ticker": ticker, "local_score": 50, "verdict": "HOLD"}
+
+
+def _agentic_v58_analysis(ticker, question, language_hint="english"):
+    """
+    Agentic AI: Two-stage analysis engine.
+    Stage 1 → gather live data (V58 format)
+    Stage 2 → deep AI analysis with buy/sell/hold + future prediction
+    Returns formatted markdown response.
+    """
+    # ── STAGE 1: Gather Data
+    ctx = _build_v58_context(ticker)
+
+    if ctx.get("error") and not ctx.get("price"):
+        return f"⚠️ Could not fetch data for **{ticker}**. Please check the ticker symbol and try again."
+
+    # ── Format Stage 1 block
+    stage1_block = f"""
+=== STAGE 1: LIVE DATA GATHERING (V58 Titanium — Agentic Engine) ===
+Ticker       : {ctx.get('ticker', ticker)}
+NSE/Exchange : {ctx.get('nse', ticker)}
+Sector       : {ctx.get('sector', 'N/A')}
+Industry     : {ctx.get('industry', 'N/A')}
+Current Price: ₹{ctx.get('price', 'N/A')} {ctx.get('currency','')}  ({'+' if (ctx.get('change_pct') or 0) >= 0 else ''}{ctx.get('change_pct', 0)}%)
+
+ROE          : {ctx.get('roe', 'N/A')}%
+Piotroski    : {ctx.get('piotroski', 'N/A')} / 9
+EPS Growth   : {ctx.get('eps_growth', 'N/A')}%
+Revenue Growth: {ctx.get('rev_growth', 'N/A')}%
+PEG          : {ctx.get('peg', 'N/A')}
+PE TTM       : {ctx.get('pe_ttm', 'N/A')}
+Forward PE   : {ctx.get('forward_pe', 'N/A')}
+Profit Margin: {ctx.get('profit_margin', 'N/A')}%
+Debt/Equity  : {ctx.get('debt_equity', 'N/A')}
+
+RSI          : {ctx.get('rsi', 'N/A')}
+Momentum Score: {ctx.get('momentum_score', 'N/A')}
+ADX          : {ctx.get('adx', 'N/A')}
+SMA200 Dist  : {ctx.get('sma200_dist', 'N/A')}%
+Leverage Delta: {ctx.get('leverage_delta', 'N/A')}% (EPS vs Rev gap)
+52W High Dist: {ctx.get('dist_52w_high', 'N/A')}%
+52W Low Dist : {ctx.get('dist_52w_low', 'N/A')}%
+52W High     : ₹{ctx.get('w52_high', 'N/A')} | 52W Low: ₹{ctx.get('w52_low', 'N/A')}
+
+Insider %    : {ctx.get('insider_pct', 'N/A')}% | Inst %: {ctx.get('inst_pct', 'N/A')}%
+Short Ratio  : {ctx.get('short_ratio', 'N/A')}
+Beta         : {ctx.get('beta', 'N/A')}
+Dividend Yield: {ctx.get('dividend_yield', 'N/A')}%
+
+Pivot Dist   : {ctx.get('pivot_dist', 'N/A')}%
+Pivot R1     : {ctx.get('pivot_r1', 'N/A')}% | R2: {ctx.get('pivot_r2', 'N/A')}% | R3: {ctx.get('pivot_r3', 'N/A')}%
+Pivot S1     : {ctx.get('pivot_s1', 'N/A')}% | S2: {ctx.get('pivot_s2', 'N/A')}% | S3: {ctx.get('pivot_s3', 'N/A')}%
+
+Cash Ops Annual  : ₹{ctx.get('cash_ops', 'N/A')} Cr
+Cash Invest Annual: ₹{ctx.get('cash_invest', 'N/A')} Cr
+Cash Fin Annual  : ₹{ctx.get('cash_fin', 'N/A')} Cr
+Net Cash Flow    : ₹{ctx.get('net_cash', 'N/A')} Cr
+
+Analyst Target   : ₹{ctx.get('analyst_target', 'N/A')} | Upside: {ctx.get('analyst_upside', 'N/A')}%
+Analyst Reco     : {ctx.get('analyst_rec', 'N/A')} ({ctx.get('analyst_count', 0)} analysts)
+
+Local Score  : {ctx.get('local_score', 50)} → {ctx.get('verdict', 'HOLD')}
+Business     : {ctx.get('summary', 'N/A')[:200]}
+"""
+
+    # ── Build AI prompt for Stage 2 deep analysis
+    system_prompt = f"""You are FinVision AI v6 — an expert quantitative analyst trained on the V58 Trend Engine methodology.
+
+You perform TWO-STAGE AGENTIC ANALYSIS exactly like a professional quant report:
+
+**STAGE 2 FORMAT (MANDATORY):**
+
+### **Quant Assessment: [Company Name] ([Ticker])**
+**Core Thesis:** [2-3 sentence overall view with risk/reward stance]
+
+---
+
+### **1. Forensic Financial & Operational Health**
+- Growth Sustainability (quality of EPS vs Revenue growth)
+- Margin & Cash Flow Quality (is OCF positive? FCF analysis)
+- Institutional & Promoter Sentiment
+
+### **2. Valuation & Relative Performance**
+- Is it cheap for a reason or genuinely undervalued?
+- P/E, PEG, Forward PE context
+- Sector/index relative performance
+
+### **3. Technical & Momentum Positioning**
+- RSI, ADX, Momentum Score interpretation
+- Pivot Levels with EXACT price targets:
+  * Support levels (S1, S2, S3) with % and estimated price
+  * Resistance levels (R1, R2, R3) with % and estimated price
+- 52-week range positioning
+
+### **4. 🔮 Future Prediction & Price Targets (12-Month)**
+- **Bull Case:** Specific price target + % upside + conditions required
+- **Base Case:** Most likely price target + % move + key assumptions
+- **Bear Case:** Downside price target + % risk + triggers
+- **Timeline:** Short-term (1 month), Medium-term (3 months), Long-term (12 months) outlook
+
+### **5. Forward-Looking Integration & Verdict**
+- Key catalysts to watch (earnings, sector trends, macro factors)
+- Key risks (specific, not generic)
+- Final recommendation with conviction level
+
+**CRITICAL RULES:**
+- ALWAYS reply in the SAME language as the user's question. Hindi→Hindi, English→English, Hinglish→Hinglish
+- ALWAYS include specific rupee/dollar price targets in the Future Prediction section
+- ALWAYS give a clear BUY / HOLD / SELL / ACCUMULATE verdict with stop-loss levels
+- Use emojis for visual impact (🟢 bullish, 🔴 bearish, 🟡 neutral, 📊 data, 🎯 target, ⚠️ risk)
+- End EVERY response with: ⚠️ **Disclaimer:** Educational only. Consult SEBI-registered advisor before investing.
+"""
+
+    user_msg = f"""
+{stage1_block}
+
+=== USER QUESTION ===
+{question}
+
+=== TASK ===
+Perform Stage 2 Deep Analysis using the V58 methodology above. 
+Include specific price targets for Bull/Base/Bear cases.
+Current price is ₹{ctx.get('price', 'N/A')}.
+Give verdict: {ctx.get('verdict', 'HOLD')} (Local Score: {ctx.get('local_score', 50)}/100)
+"""
+
+    # ── Call AI
+    # 1. Try Gemini
+    if GEMINI_AVAILABLE:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            payload = {
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": [{"parts": [{"text": user_msg}]}],
+                "generationConfig": {"maxOutputTokens": 2500, "temperature": 0.65}
+            }
+            resp = req_lib.post(url, json=payload, timeout=30)
+            data = resp.json()
+            text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+            if text and len(text) > 100:
+                return {"answer": text, "source": "Gemini (Agentic V58)", "stage1": stage1_block}
+        except Exception as e:
+            pass
+
+    # 2. Try Claude/Anthropic
+    if AI_AVAILABLE and _anthropic_lib:
+        try:
+            client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
+            msg = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2500,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            return {"answer": msg.content[0].text, "source": "Claude (Agentic V58)", "stage1": stage1_block}
+        except Exception as e:
+            pass
+
+    # 3. Fallback — return structured data without AI narrative
+    price = ctx.get("price", 0) or 0
+    score = ctx.get("local_score", 50)
+    verdict = ctx.get("verdict", "HOLD")
+    rsi = ctx.get("rsi", 50) or 50
+    adx = ctx.get("adx", 20) or 20
+    eps_g = ctx.get("eps_growth", 0) or 0
+    rev_g = ctx.get("rev_growth", 0) or 0
+    sma200 = ctx.get("sma200_dist", 0) or 0
+
+    # Determine color/emoji
+    if score >= 85: verdict_emoji = "🟢🚀"
+    elif score >= 65: verdict_emoji = "🟢"
+    elif score >= 45: verdict_emoji = "🟡"
+    else: verdict_emoji = "🔴"
+
+    # Compute basic price targets
+    upside_pct = ctx.get("analyst_upside") or (15 if score >= 70 else 5 if score >= 50 else -10)
+    bull_target = round(price * (1 + max(upside_pct / 100 * 1.5, 0.20)), 2) if price else "N/A"
+    base_target = round(price * (1 + max(upside_pct / 100 * 0.7, 0.05)), 2) if price else "N/A"
+    bear_target = round(price * 0.85, 2) if price else "N/A"
+
+    fallback = f"""### **Quant Assessment: {ctx.get('ticker', ticker)} — Agentic V58**
+
+**Core Thesis:** {verdict_emoji} Local Score **{score}/100** → **{verdict}**
+{'Strong technical momentum with positive fundamentals.' if score >= 70 else 'Caution warranted — mixed signals across fundamental and technical factors.' if score >= 45 else 'Bearish structure — multiple red flags in fundamentals and technicals.'}
+
+---
+
+### **📊 Stage 1 Data Summary**
+- **Price:** ₹{price} | **RSI:** {rsi} {'🔴 Overbought' if rsi > 70 else '🟢 Oversold' if rsi < 30 else '🟡 Neutral'}
+- **ADX:** {adx} {'(Strong Trend)' if adx > 25 else '(Weak/No Trend)'}
+- **SMA200 Distance:** {sma200}% {'🟢 Above SMA200' if sma200 > 0 else '🔴 Below SMA200'}
+- **EPS Growth:** {eps_g}% | **Revenue Growth:** {rev_g}%
+- **Piotroski Score:** {ctx.get('piotroski', 5)}/9
+
+### **🔮 Future Prediction (12-Month)**
+| Scenario | Target | Move |
+|---|---|---|
+| 🟢 Bull Case | ₹{bull_target} | +{round(max(upside_pct*1.5, 20), 1)}% |
+| 🟡 Base Case | ₹{base_target} | +{round(max(upside_pct*0.7, 5), 1)}% |
+| 🔴 Bear Case | ₹{bear_target} | -15% |
+
+### **🎯 Key Levels**
+- **Support:** S1 at {ctx.get('pivot_s1', 'N/A')}% | S2 at {ctx.get('pivot_s2', 'N/A')}%
+- **Resistance:** R1 at {ctx.get('pivot_r1', 'N/A')}% | R2 at {ctx.get('pivot_r2', 'N/A')}%
+- **52W Range:** ₹{ctx.get('w52_low', 'N/A')} — ₹{ctx.get('w52_high', 'N/A')}
+
+### **⚡ Verdict: {verdict}**
+{'Add AI API key (Gemini/Anthropic) in app.py for full V58-style narrative analysis.' if not GEMINI_AVAILABLE and not AI_AVAILABLE else 'AI request failed — check API keys in app.py'}
+
+⚠️ **Disclaimer:** Educational only. Consult SEBI-registered advisor before investing."""
+
+    return {"answer": fallback, "source": "V58 Engine (No AI Key)", "stage1": stage1_block}
+
+
+def _ai_chat(question):
+    """
+    Enhanced chat handler — routes stock queries to Agentic V58 engine,
+    market/general queries to standard AI handler.
+    """
     q_up = question.upper()
+
+    # ── Step 1: Detect ticker in question
     ticker_found = None
     all_stocks = {**POPULAR_INDIAN_STOCKS, **POPULAR_GLOBAL_STOCKS}
+
+    # Check known stocks by name
     for name, ticker in all_stocks.items():
-        base = re.sub(r'\..+$', '', ticker)
-        if name.upper() in q_up or base in q_up:
+        if name.upper() in q_up:
             ticker_found = ticker
             break
+
+    # Check by ticker symbol in text
     if not ticker_found:
         words = re.findall(r'\b([A-Z]{2,10}(?:\.NS|\.BO|\.KS)?)\b', q_up)
         skip = {"THE","AND","FOR","BUY","SELL","HOW","WHY","WHAT","WHICH","BEST","TOP",
-                "NSE","BSE","NIFTY","MARKET","STOCK","PRICE","TODAY"}
+                "NSE","BSE","NIFTY","MARKET","STOCK","PRICE","TODAY","HINDI","ENGLISH",
+                "ANALYSIS","FUTURE","OUTLOOK","VS","OR","AI","CHAT","TELL","GIVE","SHOW"}
         for w in words:
             if w not in skip:
+                # Check known tickers first
+                for name, t in all_stocks.items():
+                    base = re.sub(r'\..+$', '', t)
+                    if w == base or w == t.upper():
+                        ticker_found = t
+                        break
+                if ticker_found: break
+                # Try yfinance lookup
                 for suf in ["", ".NS", ".BO"]:
                     try:
                         info = yf.Ticker(w + suf).info or {}
-                        if info.get("regularMarketPrice"):
+                        if info.get("regularMarketPrice") or info.get("currentPrice"):
                             ticker_found = w + suf
                             break
                     except: pass
                 if ticker_found: break
-    context = ""
-    if ticker_found:
-        q_d = _fetch_one(ticker_found)
-        f_data = _fetch_fundamentals(ticker_found)
-        ta = _technical_analysis(ticker_found)
-        fo = _future_performance(ticker_found)
-        ol = fo.get("details", {})
-        sc = fo.get("scenarios", {})
-        context = f"""
-=== LIVE DATA: {ticker_found} ===
-Price: {q_d.get('price')} {q_d.get('currency')} | Change: {q_d.get('change_pct')}%
-P/E: {q_d.get('pe_ratio')} | Fwd P/E: {f_data.get('forward_pe')} | Mkt Cap: {q_d.get('market_cap')}
-52W H/L: {q_d.get('52w_high')} / {q_d.get('52w_low')}
-Sector: {f_data.get('sector')} | Industry: {f_data.get('industry')}
-EPS: {f_data.get('eps')} | ROE: {f_data.get('roe')} | D/E: {f_data.get('debt_equity')}
-RSI: {ta.get('rsi')} | MACD: {'Bullish' if (ta.get('macd') or 0) > (ta.get('signal') or 0) else 'Bearish'} | Momentum: {ta.get('momentum_score')}/100
-MA20/50/200: {ta.get('ma20')}/{ta.get('ma50')}/{ta.get('ma200')}
-=== 8-FACTOR FUTURE SCORE ===
-AI Score: {fo.get('composite_score')}/100 → {fo.get('grade')}
-Horizons: ST={fo.get('horizon',{}).get('short_term')} MT={fo.get('horizon',{}).get('medium_term')} LT={fo.get('horizon',{}).get('long_term')}
-Analyst Target: {ol.get('analyst_target')} (Upside: {ol.get('analyst_upside_pct')}%)
-Scenarios (1Y): Bull={sc.get('bull')} Base={sc.get('base')} Bear={sc.get('bear')}
-About: {f_data.get('summary', '')[:300]}
-"""
+
+    # ── Step 2: If stock detected → Agentic V58 analysis
+    is_stock_query = ticker_found and any(kw in q_up for kw in [
+        "ANALYSIS", "FUTURE", "OUTLOOK", "TARGET", "BUY", "SELL", "HOLD",
+        "INVEST", "PRICE", "FORECAST", "PREDICT", "SCORE", "REVIEW",
+        "KAISE", "KAISA", "BATAO", "DEKHO", "KYA", "HAI", "HO", "CHAHIYE",
+        "WORTH", "GOOD", "BAD", "STRONG", "WEAK", "BREAKOUT", "MOMENTUM"
+    ])
+
+    # If just the ticker name with no other context, also do full analysis
+    if ticker_found and not is_stock_query:
+        q_words = q_up.split()
+        ticker_base = re.sub(r'\..+$', '', ticker_found).upper()
+        if ticker_base in q_words or any(n.upper() in q_up for n, t in all_stocks.items() if t == ticker_found):
+            is_stock_query = True
+
+    if ticker_found and is_stock_query:
+        return _agentic_v58_analysis(ticker_found, question)
+
+    # ── Step 3: Market/global/general queries → standard AI
     q_low = question.lower()
-    extra = ""
-    if any(w in q_low for w in ["world","global","market today","aaj ka"]):
+    extra_context = ""
+
+    if any(w in q_low for w in ["world","global","market today","aaj ka","global market"]):
         try:
             wt = _world_market_trend()
-            extra += f"\n=== GLOBAL MARKET ===\nSentiment: {wt['sentiment']} | Avg: {wt['avg_change']}%\nVIX: {wt['vix']} | Fear: {wt['fear_gauge']}\n"
+            extra_context += f"\n=== GLOBAL MARKET ===\nSentiment: {wt['sentiment']} | Avg: {wt['avg_change']}%\nVIX: {wt['vix']} | Fear: {wt['fear_gauge']}\n"
         except: pass
+
     if any(w in q_low for w in ["india","nifty","sensex","indian market","impact"]):
         try:
             it = _india_market_trend()
             imp = _global_india_impact()
-            extra += f"\n=== INDIA MARKET ===\nSentiment: {it['sentiment']} | Avg: {it['avg_change']}%\nNIFTY: {it['nifty'].get('price')} ({it['nifty'].get('change_pct')}%)\nGlobal Impact Signal: {imp['overall'].get('overall_signal')}\n"
+            extra_context += f"\n=== INDIA MARKET ===\nSentiment: {it['sentiment']} | Avg: {it['avg_change']}%\nNIFTY: {it['nifty'].get('price')} ({it['nifty'].get('change_pct')}%)\nGlobal Impact Signal: {imp['overall'].get('overall_signal')}\n"
         except: pass
-    full_ctx = context + extra
+
+    if ticker_found and not is_stock_query:
+        # Fetch basic data even for non-analysis stock queries
+        q_d = _fetch_one(ticker_found)
+        extra_context += f"\n=== {ticker_found} LIVE PRICE ===\nPrice: {q_d.get('price')} | Change: {q_d.get('change_pct')}%\n"
+
     system_prompt = (
         "You are FinVision AI v6, expert financial analyst for Indian & global markets. "
-        "Live market data + 8-factor future performance scores provided. "
+        "Live market data provided. "
         "CRITICAL: Reply in SAME language as user. Hindi→Hindi. English→English. Hinglish→Hinglish. "
-        "Give structured analysis. For stocks include: current status, 8-factor score breakdown, "
-        "short/medium/long-term outlook, key risks, buy/hold/sell recommendation with reasoning. "
+        "Give structured, insightful analysis. For market queries include global→India impact assessment. "
         "End with: ⚠️ Disclaimer: Educational only. SEBI-registered advisor se consult karein."
     )
-    if gemini_key:
+
+    user_content = f"{extra_context}\n\nUser: {question}"
+
+    # Try Gemini
+    if GEMINI_AVAILABLE:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
             payload = {
                 "system_instruction": {"parts": [{"text": system_prompt}]},
-                "contents": [{"parts": [{"text": f"{full_ctx}\n\nUser: {question}"}]}],
+                "contents": [{"parts": [{"text": user_content}]}],
                 "generationConfig": {"maxOutputTokens": 1500, "temperature": 0.7}
             }
             resp = req_lib.post(url, json=payload, timeout=20)
             data = resp.json()
             text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
             if text:
-                return text
-        except: pass
+                return {"answer": text, "source": "Gemini"}
+        except Exception as e:
+            pass
+
+    # Try Claude
     if AI_AVAILABLE and _anthropic_lib:
         try:
-            client = _anthropic_lib.Anthropic(api_key=_ANTHROPIC_KEY)
+            client = _anthropic_lib.Anthropic(api_key=ANTHROPIC_API_KEY)
             msg = client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=1500,
                 system=system_prompt,
-                messages=[{"role": "user", "content": f"{full_ctx}\n\nUser: {question}"}],
+                messages=[{"role": "user", "content": user_content}],
             )
-            return msg.content[0].text
-        except: pass
+            return {"answer": msg.content[0].text, "source": "Claude"}
+        except Exception as e:
+            pass
+
+    # Fallback
     parts = [f"📊 **{question}**\n"]
-    if full_ctx:
-        parts.append(f"```\n{full_ctx[:800]}\n```\n")
-    parts.append("\n⚠️ *Educational only. No AI key configured — add Gemini key in Settings.*")
-    return "".join(parts)
+    if extra_context:
+        parts.append(f"```\n{extra_context[:800]}\n```\n")
+    if not GEMINI_AVAILABLE and not AI_AVAILABLE:
+        parts.append("\n⚠️ *No AI key configured. Open app.py and add GEMINI_API_KEY or ANTHROPIC_API_KEY at the top.*")
+    else:
+        parts.append("\n⚠️ *AI request failed. Check your API keys in app.py*")
+    return {"answer": "".join(parts), "source": "fallback"}
+
 
 # ─── FLASK ROUTES ───
 @app.route("/")
 def index():
-    
     if not DEPS_OK:
         return (
             "<html><body style='font-family:monospace;background:#020509;color:#c8dff0;padding:2rem'>"
@@ -959,7 +1476,14 @@ def index():
 
 @app.route("/api/health")
 def api_health():
-    return jsonify({"status": "ok", "ai": AI_AVAILABLE, "time": datetime.now().isoformat()})
+    return jsonify({
+        "status": "ok",
+        "ai_gemini": GEMINI_AVAILABLE,
+        "ai_claude": AI_AVAILABLE,
+        "ai_model": GEMINI_MODEL if GEMINI_AVAILABLE else ("claude-sonnet" if AI_AVAILABLE else "none"),
+        "agentic_v58": True,
+        "time": datetime.now().isoformat()
+    })
 
 @app.route("/api/indices/global")
 def api_global():
@@ -1044,9 +1568,26 @@ def api_live_pulse():
 def api_chat():
     data = request.get_json(force=True) or {}
     q = (data.get("question") or "").strip()
-    gemini_key = (data.get("gemini_key") or "").strip()
     if not q: return jsonify({"error": "question required"}), 400
-    return jsonify({"answer": _ai_chat(q, gemini_key=gemini_key or None), "timestamp": datetime.now().isoformat()})
+    result = _ai_chat(q)
+    return jsonify({
+        "answer": result.get("answer", ""),
+        "source": result.get("source", ""),
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route("/api/v58/<ticker>")
+def api_v58(ticker):
+    """Direct V58 agentic analysis endpoint"""
+    ticker = ticker.upper()
+    question = request.args.get("q", f"Full V58 analysis of {ticker}")
+    result = _agentic_v58_analysis(ticker, question)
+    return jsonify({
+        "answer": result.get("answer", ""),
+        "source": result.get("source", ""),
+        "stage1": result.get("stage1", ""),
+        "timestamp": datetime.now().isoformat()
+    })
 
 @app.route("/api/search/<path:query>")
 def api_search(query):
@@ -1058,16 +1599,29 @@ def open_browser():
     webbrowser.open("http://localhost:5000")
 
 if __name__ == "__main__":
-    print("""
- ╔══════════════════════════════════════════════════╗
- ║   FinVision v6.0 — Split Architecture           ║
- ║   Backend: app.py  |  Frontend: index.html      ║
- ║   ✅ Global→India Impact Analysis               ║
- ║   ✅ Gemini AI + Watchlist                      ║
- ║   ✅ News from 6 sources                        ║
- ║   ✅ 8-Factor AI Score                          ║
- ║   📡 Opening: http://localhost:5000             ║
- ╚══════════════════════════════════════════════════╝
+    ai_status = "Gemini ✅" if GEMINI_AVAILABLE else ("Claude ✅" if AI_AVAILABLE else "❌ No AI Key")
+    print(f"""
+ ╔══════════════════════════════════════════════════════╗
+ ║   FinVision v6.1 — Live Market Analyzer             ║
+ ║   Backend: app.py  |  Frontend: index.html          ║
+ ║   ✅ Global→India Impact Analysis                   ║
+ ║   ✅ 8-Factor AI Score                              ║
+ ║   ✅ News from 6 sources (live, no cache)           ║
+ ║   ✅ Continuously Live Prices                       ║
+ ║   🤖 Agentic V58 Deep Analysis Engine              ║
+ ║   🤖 AI Engine: {ai_status:<34}║
+ ║   📡 Opening: http://localhost:5000                 ║
+ ╚══════════════════════════════════════════════════════╝
+
+ 🔑 API KEYS STATUS:
+    Gemini  : {'✅ CONFIGURED' if GEMINI_AVAILABLE else '❌ Not set — edit GEMINI_API_KEY at top of app.py'}
+    Anthropic: {'✅ CONFIGURED' if AI_AVAILABLE else '❌ Not set — edit ANTHROPIC_API_KEY at top of app.py'}
+
+ 🚀 AGENTIC V58 ENGINE:
+    - Stock queries trigger 2-stage deep analysis
+    - Stage 1: Live data gathering (V58 format)
+    - Stage 2: AI narrative with price targets & prediction
+    - Direct API: /api/v58/TICKER?q=your+question
 """)
     threading.Thread(target=open_browser, daemon=True).start()
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
